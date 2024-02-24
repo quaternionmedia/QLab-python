@@ -1,3 +1,4 @@
+from json import loads
 from socket import AF_INET, SOCK_DGRAM, create_connection, socket
 from struct import unpack
 
@@ -32,7 +33,7 @@ def oscParse(thing):  # turn osc message into python command
 
 
 def tcpParse(thing):
-    # print('stripping SLIP from: ', thing)
+    print('stripping SLIP from: ', thing)
     if thing.find(END + END) >= 0:  # there's more than one message here
         things = list(filter(bool, thing.split(END + END)))
         parsed = []
@@ -41,7 +42,12 @@ def tcpParse(thing):
             parsed.append(raw)
         return parsed
     else:  # there's only one message here
-        return unSlip(thing)
+        message = unSlip(thing).decode()
+        split_point = message.find('{')
+        address = message[:split_point]
+        data = message[split_point:]
+        print(address)
+        return loads(data)
 
 
 def slip(packet):  # RFC 1055
@@ -59,15 +65,15 @@ def slip(packet):  # RFC 1055
 
 
 def unSlip(thing):
-    if thing[1] == END:
+    if thing.find(END) == 0:
         thing = thing[1:]
-    if thing[-1] == END:
+    if thing.find(END) == len(thing) - 1:
         thing = thing[:-1]
     while thing.find(ESC + ESC_END) > -1:
         thing.replace(ESC + ESC_END, END)
     while thing.find(ESC + ESC_ESC) > -1:
         thing.replace(ESC + ESC_END, ESC)
-    return thing
+    return unPadBack(thing)
 
 
 def unPadFront(thing):
@@ -77,7 +83,7 @@ def unPadFront(thing):
 
 
 def unPadBack(thing):
-    while thing[-1] == 0:  # NULL evaluates to 0
+    while thing.rfind(NULL) == len(thing) - 1:
         thing = thing[:-1]
     return thing
 
