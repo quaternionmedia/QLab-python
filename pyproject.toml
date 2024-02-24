@@ -1,0 +1,21 @@
+[project]
+name = "qlab-python"
+version = "0.1.0"
+description = "QLab interface for Python"
+authors = [
+    {name = "Quaternion Media, LLC",email = "harpo@quaternion.media"},
+]
+dependencies = [
+    "python-osc>=1.8.3",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
