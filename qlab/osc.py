@@ -1,10 +1,8 @@
-from codecs import encode
-from queue import Queue
-from socket import AF_INET, SOCK_DGRAM, SOCK_STREAM, create_connection, socket
+from socket import AF_INET, SOCK_DGRAM, create_connection, socket
 from struct import unpack
 
 # from pythonosc import udp_client
-from threading import Lock, Thread
+from threading import Lock
 
 from pythonosc import osc_message_builder
 
@@ -25,7 +23,7 @@ def oscParse(thing):  # turn osc message into python command
     for i in address:  # add rest of address
         cmd += '\'' + unPadBack(i).decode('utf8') + '\'' + ','
     for j in parseNumbers(args[2]):  # add all numbers as strings to cmd
-        if j is not b'':
+        if j != b'':
             cmd += str(j) + ','
             # print('adding number ', j)
     cmd += ')'
@@ -126,4 +124,3 @@ class Server(Osc):
         self.conn = socket(AF_INET, SOCK_DGRAM)
         self.conn.bind((addr, port))
         self.lock = Lock()
-        # self.conn.listen(5)

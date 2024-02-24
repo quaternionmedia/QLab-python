@@ -1,4 +1,4 @@
-from osc import Client, Server
+from qlab.osc import Client, Server
 
 
 class QLab:
@@ -8,8 +8,6 @@ class QLab:
 
     def send(self, message='/go'):
         self.client.send_message(message)
-        # self.client.messages.append(None)
-        # return self.client.get_message()
 
     def cue(self, cue):
         self.send('/cue/%s/start' % cue)
@@ -30,17 +28,15 @@ class QLab:
         self.client.send_message('/cue/{cue_no}/{name}'.format(**locals()), value=value)
 
     def select_next_cue(self):
-        old = self.get_cue_property('selected', 'number')
         self.client.send_message('/select/next')
         cue_no = self.get_cue_property('selected', 'number')
-        print(old, cue_no)
+        print(cue_no)
         return cue_no
 
     def select_previous_cue(self):
-        old = self.get_cue_property('selected', 'number')
         self.client.send_message('/select/previous')
         cue_no = self.get_cue_property('selected', 'number')
-        print(old, cue_no)
+        print(cue_no)
         return cue_no
 
     def go(self):
