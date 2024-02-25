@@ -4,10 +4,11 @@ from qlab.osc import Client, Server
 class QLab:
     def __init__(self):
         self.client = Client('127.0.0.1', 53000)
-        self.server = Server('127.0.0.1', 51365)
+        # self.server = Server('127.0.0.1', 51365)
 
-    def send(self, message='/go'):
-        self.client.send_message(message)
+    def send(self, message='/go', value=None):
+        self.client.send_message(message, value)
+        return self.client.get_message()
 
     def cue(self, cue):
         self.send('/cue/%s/start' % cue)
