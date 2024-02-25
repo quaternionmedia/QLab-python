@@ -53,12 +53,12 @@ def tcpParse(thing):
 def slip(packet):  # RFC 1055
     encoded = END
     for char in packet:
-        if char == END:
+        if char == END[0]:
             encoded += ESC + ESC_END
-        elif char == ESC:
+        elif char == ESC[0]:
             encoded += ESC + ESC_ESC
         else:
-            encoded += char.encode()
+            encoded += char.to_bytes()
     encoded += NULL * ((len(encoded) % 4) + 3)  # padding magic
     encoded += END
     return encoded
@@ -98,7 +98,7 @@ def build(message, value=None):  # assemble and SLIP message
     msg = osc_message_builder.OscMessageBuilder(address=message)
     if value:
         msg.add_arg(value)
-    return slip(msg.build().address)
+    return slip(msg.build().dgram)
 
 
 class Osc:
