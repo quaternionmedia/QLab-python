@@ -1,3 +1,5 @@
+from time import sleep
+
 from qlab.osc import Client, Server
 
 
@@ -7,7 +9,9 @@ class QLab:
         # self.server = Server('127.0.0.1', 51365)
 
     def send(self, message='/go', value=None):
+        sleep(0.01)
         self.client.send_message(message, value)
+        # sleep(0.01)
         return self.client.get_message()
 
     def cue(self, cue):
@@ -19,11 +23,8 @@ class QLab:
     def get_cue_text(self, cue_no):
         return self.get_cue_property(cue_no, 'text')
 
-    def get_cue_property(self, cue_no, name):
-        self.client.send_message('/cue/{cue_no}/{name}'.format(**locals()))
-        response = self.client.get_message()
-        if response:
-            return response.get('data')
+    def get_cue_property(self, cue_no, property):
+        return self.send(f'/cue/{cue_no}/{property}')['data']
 
     def set_cue_property(self, cue_no, name, value):
         self.client.send_message('/cue/{cue_no}/{name}'.format(**locals()), value=value)

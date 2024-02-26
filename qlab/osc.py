@@ -97,7 +97,11 @@ def parseNumbers(thing):  # Qlab sends a 3 byte 'header' for type, then the numb
 def build(message, value=None):  # assemble and SLIP message
     msg = osc_message_builder.OscMessageBuilder(address=message)
     if value:
-        msg.add_arg(value)
+        if isinstance(value, list):
+            for v in value:
+                msg.add_arg(v)
+        else:
+            msg.add_arg(value)
     return slip(msg.build().dgram)
 
 
