@@ -33,7 +33,7 @@ def oscParse(thing):  # turn osc message into python command
 
 
 def tcpParse(thing):
-    print('stripping SLIP from: ', thing)
+    # print('stripping SLIP from: ', thing)
     if thing.find(END + END) >= 0:  # there's more than one message here
         things = list(filter(bool, thing.split(END + END)))
         parsed = []
@@ -46,7 +46,7 @@ def tcpParse(thing):
         split_point = message.find('{')
         address = message[:split_point]
         data = message[split_point:]
-        print(address)
+        # print(address)
         return loads(data)
 
 
@@ -125,7 +125,7 @@ class Client(Osc):  # TCP SLIP osc 1.1 connection
 
     def send_message(self, message, value=None):
         encoded = build(message, value)
-        print('sending: ', encoded)
+        # print('sending: ', encoded)
         self.conn.send(encoded)
 
 

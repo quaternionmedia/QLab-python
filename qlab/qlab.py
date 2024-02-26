@@ -1,5 +1,3 @@
-from time import sleep
-
 from qlab.osc import Client, Server
 
 
@@ -9,9 +7,7 @@ class QLab:
         # self.server = Server('127.0.0.1', 51365)
 
     def send(self, message='/go', value=None):
-        sleep(0.01)
         self.client.send_message(message, value)
-        # sleep(0.01)
         return self.client.get_message()
 
     def cue(self, cue):
