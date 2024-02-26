@@ -46,10 +46,12 @@ def parse_cuelist(cuelist):
     """Parse a QLab cuelist into a dictionary of cues"""
     parsed = {}
     for cue in cuelist['cues']:
+        if cue.get('cues'):
+            # print('nested cuelist', cue)
+            parsed.update(parse_cuelist(cue))
         # print('parsing cue', cue)
         if not cue['number']:
             continue
-        # cue['type'] = CUE_TYPES[cue['type']]
         parsed[cue['number']] = Cue(**cue)
     return parsed
 
@@ -95,8 +97,10 @@ class Cues:
             cue.id = self.q.get_cue_property(cue.number, 'uniqueID')
         if cue.number:
             self.q.send(f'/cue_id/{cue.id}/number', value=cue.number)
-        self.q.send(f'/cue_id/{cue.id}/name', value=cue.name) if cue.name else None
-        self.q.send(f'/cue_id/{cue.id}/notes', value=cue.notes) if cue.notes else None
+        if cue.name:
+            self.q.send(f'/cue_id/{cue.id}/name', value=cue.name)
+        if cue.notes:
+            self.q.send(f'/cue_id/{cue.id}/notes', value=cue.notes)
         if cue.layer == 'Lights':
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
             self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
