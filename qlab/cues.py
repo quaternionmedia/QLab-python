@@ -6,8 +6,10 @@ from typing_extensions import Literal
 
 from qlab import QLab
 
-TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text']
+TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group']
 LAYERS = Literal['Lights', 'Sound', 'Video', 'Music']
+
+NOTE_ON = 0x90
 
 LAYER_IDS = {
     'Lights': '',
@@ -19,7 +21,8 @@ LAYER_IDS = {
 
 CUE_TYPES = {
     'Lights': 'Network',
-    'Sound': 'MIDI',
+    'Sound': 'Group',
+    'MIDI': 'MIDI',
     'Video': 'Video',
     'Music': 'Audio',
 }
@@ -57,9 +60,10 @@ def parse_cuelist(cuelist):
 
 
 class Cues:
-    def __init__(self, csv: str):
+    def __init__(self, csv: str, channels: dict = {}, **kwargs):
         self.csv_cues = open_csv(csv)
-        self.q = QLab()
+        self.channels = channels
+        self.q = QLab(**kwargs)
         self.get_cuelists()
 
     def get_cuelists(self):
@@ -101,17 +105,39 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/name', value=cue.name)
         if cue.notes:
             self.q.send(f'/cue_id/{cue.id}/notes', value=cue.notes)
+
+        # Layer specific settings
         if cue.layer == 'Lights':
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
             self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         elif cue.layer == 'Sound':
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
+            self.sound_cue(cue)
             self.q.send(f'/cue_id/{cue.id}/midiNote', 127)
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'none')
         elif cue.layer == 'Music':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'green')
         elif cue.layer == 'Video':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
         return cue
+
+    def sound_cue(self, cue: Cue):
+        if not cue.name.startswith(('mute', 'unmute')):
+            raise ValueError('Sound cues must begin with "mute" or "unmute"', cue)
+        action = cue.name.split(' ')[0]
+        mute = action == 'mute'
+        targets = cue.name.split(' ')[1:]
+        print('sound cue', action, targets)
+        for n, target in enumerate(targets):
+            if f's{cue.id}.{n}' not in self.cues:
+                sound_cue = self.create_cue(
+                    Cue(type='MIDI', number=f's{cue.number}.{n}'), previous=cue.id
+                )
+                self.q.send(f'/move/{sound_cue.id}', [n, cue.id])
+                self.q.send(
+                    f'/cue_id/{sound_cue.id}/byte1', NOTE_ON | self.channels[target]
+                )
+                self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
+                self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
     def create_cue(self, cue: Cue, previous: UUID = None):
         """Create a cue"""

@@ -2,8 +2,8 @@ from qlab.osc import Client, Server
 
 
 class QLab:
-    def __init__(self):
-        self.client = Client('127.0.0.1', 53000)
+    def __init__(self, address='localhost', port=53000):
+        self.client = Client(address, port)
         # self.server = Server('127.0.0.1', 51365)
 
     def send(self, message='/go', value=None):

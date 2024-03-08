@@ -113,7 +113,10 @@ class Osc:
             queue.put(parts)
 
     def get_message(self):  # returns one message. Joins  until message is gotten.
-        data, address = self.conn.recvfrom(2**24)
+        data = b''
+        while not data or data[-1] != ord(END):
+            chunk, address = self.conn.recvfrom(2**16)
+            data += chunk
         return tcpParse(data)
 
 
