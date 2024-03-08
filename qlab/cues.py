@@ -125,17 +125,18 @@ class Cues:
             raise ValueError('Sound cues must begin with "mute" or "unmute"', cue)
         action = cue.name.split(' ')[0]
         mute = action == 'mute'
-        targets = cue.name.split(' ')[1:]
+        targets = cue.name[len(action) :].split(',')
+        targets = [t.strip() for t in targets]
         print('sound cue', action, targets)
         for n, target in enumerate(targets):
-            if f's{cue.id}.{n}' not in self.cues:
+            cue_number = f'{cue.number}.{n}'
+            if cue_number not in self.cues:
                 sound_cue = self.create_cue(
-                    Cue(type='MIDI', number=f's{cue.number}.{n}'), previous=cue.id
+                    Cue(type='MIDI', number=cue_number), previous=cue.id
                 )
                 self.q.send(f'/move/{sound_cue.id}', [n, cue.id])
-                self.q.send(
-                    f'/cue_id/{sound_cue.id}/byte1', NOTE_ON | self.channels[target]
-                )
+                self.q.send(f'/cue_id/{sound_cue.id}/number', cue_number)
+                self.q.send(f'/cue_id/{sound_cue.id}/byte1', self.channels[target])
                 self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
                 self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
