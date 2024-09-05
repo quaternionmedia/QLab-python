@@ -1,12 +1,12 @@
 from csv import DictReader
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from typing_extensions import Literal
 
 from qlab import QLab
 
-TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group']
+TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List']
 LAYERS = Literal['Lights', 'Sound', 'Video', 'Music']
 
 NOTE_ON = 0x90
@@ -34,9 +34,12 @@ class Cue(BaseModel):
 
     layer: LAYERS | None = Field(None, alias='Layer Title')
 
-    number: str | None = Field(None, alias='Cue Number')
-    name: str | None = Field(None, alias='Label')
+    number: str | None = Field(
+        None, validation_alias=AliasChoices('Cue Number', 'number')
+    )
+    name: str | None = Field(None, validation_alias=AliasChoices('Label', 'name'))
     notes: str | None = None
+    cues: list['Cue'] | None = None
 
 
 def open_csv(csv):
@@ -45,37 +48,38 @@ def open_csv(csv):
         return list(reader)
 
 
-def parse_cuelist(cuelist):
-    """Parse a QLab cuelist into a dictionary of cues"""
-    parsed = {}
-    for cue in cuelist['cues']:
-        if cue.get('cues'):
-            # print('nested cuelist', cue)
-            parsed.update(parse_cuelist(cue))
-        # print('parsing cue', cue)
-        if not cue['number']:
+def flatten_cuelist(cuelist: Cue) -> dict[str, Cue]:
+    """Flatten a QLab cuelist into a dictionary of cues by number"""
+    results = {}
+    for cue in cuelist.cues:
+        if cue.cues:
+            # print('nested cuelist', cue.cues)
+            results.update(flatten_cuelist(cue))
+            # print('parsing cue', cuelist)
+        if not cue.number:
             continue
-        parsed[cue['number']] = Cue(**cue)
-    return parsed
+        results[cue.number] = cue
+    return results
 
 
 class Cues:
-    def __init__(self, csv: str, channels: dict = {}, **kwargs):
-        self.csv_cues = open_csv(csv)
+    def __init__(self, channels: dict = {}, **kwargs):
         self.channels = channels
         self.q = QLab(**kwargs)
         self.get_cuelists()
 
     def get_cuelists(self):
-        self.cuelists = self.q.send('/cueLists')['data']
-        self.cues = parse_cuelist(self.cuelists[0])
+        self.cuelists = [Cue(**cuelist) for cuelist in self.q.send('/cueLists')['data']]
+        self.cues = flatten_cuelist(self.cuelists[0])
 
-    def sync_cuelist(self):
+    def sync_cuelist(self, csv: str):
         """Synchronize the cuelist with the cues in the csv"""
         # Refresh the cuelists
-        self.get_cuelists()
+        # self.get_cuelists()
+
+        csv_cues = open_csv(csv)
         previous = None
-        for cue in self.csv_cues:
+        for cue in csv_cues:
             if not cue['Cue Number']:
                 continue
             cue_type = CUE_TYPES[cue['Layer Title']]
