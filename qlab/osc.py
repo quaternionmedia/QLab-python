@@ -14,7 +14,7 @@ ESC_ESC = b'\xdd'
 NULL = b'\x00'
 
 
-def oscParse(thing):  # turn osc message into python command
+def oscParse(thing: bytes) -> str:  # turn osc message into python command
     # print('parsing thing: ', thing)
     args = thing.partition(b',')  # split message into address and values
     address = list(filter(bool, args[0].split(b'/')))  # seperate address into parts
@@ -32,7 +32,7 @@ def oscParse(thing):  # turn osc message into python command
     return cmd
 
 
-def tcpParse(thing):
+def tcpParse(thing: bytes) -> dict:  # turn tcp message into osc message
     # print('stripping SLIP from: ', thing)
     if thing.find(END + END) >= 0:  # there's more than one message here
         things = list(filter(bool, thing.split(END + END)))
@@ -50,7 +50,7 @@ def tcpParse(thing):
         return loads(data)
 
 
-def slip(packet):  # RFC 1055
+def slip(packet: bytes) -> bytes:  # RFC 1055
     encoded = END
     for char in packet:
         if char == END[0]:
@@ -64,7 +64,7 @@ def slip(packet):  # RFC 1055
     return encoded
 
 
-def unSlip(thing):
+def unSlip(thing: bytes) -> bytes:
     if thing.find(END) == 0:
         thing = thing[1:]
     if thing.find(END) == len(thing) - 1:
@@ -76,25 +76,29 @@ def unSlip(thing):
     return unPadBack(thing)
 
 
-def unPadFront(thing):
+def unPadFront(thing: bytes) -> bytes:
     while thing.find(NULL) == 0:
         thing = thing[1:]
     return thing
 
 
-def unPadBack(thing):
+def unPadBack(thing: bytes) -> bytes:
     while thing.rfind(NULL) == len(thing) - 1:
         thing = thing[:-1]
     return thing
 
 
-def parseNumbers(thing):  # Qlab sends a 3 byte 'header' for type, then the number(s)
+def parseNumbers(
+    thing: bytes,
+) -> bytes:  # Qlab sends a 3 byte 'header' for type, then the number(s)
     kind = thing[:2]
     thing = thing[3:]
     return unpack(b'>' + kind, thing)
 
 
-def build(message, value=None):  # assemble and SLIP message
+def build(
+    message: str, value: list | int | str | float | None = None
+):  # assemble and SLIP message
     msg = osc_message_builder.OscMessageBuilder(address=message)
     if value:
         if isinstance(value, list):
@@ -106,13 +110,9 @@ def build(message, value=None):  # assemble and SLIP message
 
 
 class Osc:
-
-    def _get_message(self, queue):  # get message and add it to queue
-        parts = self.get_message()
-        with self.lock:
-            queue.put(parts)
-
-    def get_message(self):  # returns one message. Joins  until message is gotten.
+    def get_message(
+        self,
+    ) -> dict:  # returns one message. Joins  until message is gotten.
         data = b''
         while not data or data[-1] != ord(END):
             chunk, address = self.conn.recvfrom(2**16)
@@ -121,19 +121,19 @@ class Osc:
 
 
 class Client(Osc):  # TCP SLIP osc 1.1 connection
-    def __init__(self, addr, port):
+    def __init__(self, addr, port) -> None:
         # self.client = udp_client.UDPClient(addr, port) # for udp
         self.conn = create_connection((addr, port))
         self.lock = Lock()
 
-    def send_message(self, message, value=None):
+    def send_message(self, message: str, value=None) -> None:
         encoded = build(message, value)
         # print('sending: ', encoded)
         self.conn.send(encoded)
 
 
 class Server(Osc):
-    def __init__(self, addr, port):
+    def __init__(self, addr, port) -> None:
         self.conn = socket(AF_INET, SOCK_DGRAM)
         self.conn.bind((addr, port))
         self.lock = Lock()
