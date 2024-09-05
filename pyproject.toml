@@ -2,21 +2,18 @@
 name = "qlab-python"
 version = "0.1.0"
 description = "QLab interface for Python"
-authors = [
-    {name = "Quaternion Media, LLC",email = "harpo@quaternion.media"},
-]
+authors = [{ name = "Quaternion Media, LLC", email = "harpo@quaternion.media" }]
 dependencies = [
     "python-osc>=1.8.3",
-    "pydantic>=2.6.2",
+    "pydantic>=2.8.2",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "MIT" }
 
 [build-system]
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
-
 
 [tool.pdm]
 distribution = true
