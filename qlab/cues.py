@@ -29,31 +29,49 @@ CUE_TYPES = {
 
 
 class Cue(BaseModel):
+    """Abstract cue from a csv export from CueList
+
+    Attributes:
+        Page Number
+        Layer Title
+        Cue Number
+        Label
+        Work Note
+    """
+
+    page: int | None = Field(None, alias='Page Number')
+    layer: LAYERS | None = Field(None, alias='Layer Title')
+    number: str | None = Field(None, alias='Cue Number')
+    name: str | None = Field(None, alias='Label')
+    notes: str | None = Field(None, alias='Work Note')
+
+
+class QLabCue(BaseModel):
+    """QLab cue"""
+
     id: UUID | None = Field(None, alias='uniqueID')
     type: TYPES
 
-    layer: LAYERS | None = Field(None, alias='Layer Title')
-
-    number: str | None = Field(
-        None, validation_alias=AliasChoices('Cue Number', 'number')
-    )
-    name: str | None = Field(None, validation_alias=AliasChoices('Label', 'name'))
+    number: str | None = None
+    name: str | None = None
     notes: str | None = None
-    cues: list['Cue'] | None = None
+    cues: list['QLabCue'] | None = None
+    colorName: str | None = None
+    armed: bool | None = None
 
 
 def open_csv(csv):
     with open(csv, 'r') as f:
         reader = DictReader(f)
-        return list(reader)
+        return [Cue(**l) for l in list(reader)]
 
 
-def flatten_cuelist(cuelist: Cue) -> dict[str, Cue]:
+def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
     """Flatten a QLab cuelist into a dictionary of cues by number"""
-    results = {}
+    results = {cuelist.number: cuelist}
     for cue in cuelist.cues:
         if cue.cues:
-            # print('nested cuelist', cue.cues)
+            print('nested cuelist', cue.cues)
             results.update(flatten_cuelist(cue))
             # print('parsing cue', cuelist)
         if not cue.number:
@@ -69,7 +87,9 @@ class Cues:
         self.get_cuelists()
 
     def get_cuelists(self):
-        self.cuelists = [Cue(**cuelist) for cuelist in self.q.send('/cueLists')['data']]
+        self.cuelists = [
+            QLabCue(**cuelist) for cuelist in self.q.send('/cueLists')['data']
+        ]
         self.cues = flatten_cuelist(self.cuelists[0])
 
     def sync_cuelist(self, csv: str):
@@ -99,7 +119,7 @@ class Cues:
                 print('creating cue', cue, q)
                 previous = self.create_cue(q, previous).id
 
-    def update_cue(self, cue: Cue):
+    def update_cue(self, cue: QLabCue):
         """Update a cue"""
         if not cue.id:
             cue.id = self.q.get_cue_property(cue.number, 'uniqueID')
@@ -124,7 +144,7 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
         return cue
 
-    def sound_cue(self, cue: Cue):
+    def sound_cue(self, cue: QLabCue):
         if not cue.name.startswith(('mute', 'unmute')):
             raise ValueError('Sound cues must begin with "mute" or "unmute"', cue)
         action = cue.name.split(' ')[0]
@@ -144,7 +164,7 @@ class Cues:
                 self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
                 self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
-    def create_cue(self, cue: Cue, previous: UUID = None):
+    def create_cue(self, cue: QLabCue, previous: UUID = None):
         """Create a cue"""
         value = cue.type.lower()
         # TODO We should be able to send /new type [previous]
