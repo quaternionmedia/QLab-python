@@ -138,8 +138,9 @@ class Cues:
         return cue
 
     def sound_cue(self, cue: QLabCue):
-        if not cue.name.startswith(('mute', 'unmute')):
-            raise ValueError('Sound cues must begin with "mute" or "unmute"', cue)
+        assert cue.name.startswith(('mute', 'unmute')), ValueError(
+            'Sound cues must begin with "mute" or "unmute"', cue
+        )
         action = cue.name.split(' ')[0]
         mute = action == 'mute'
         targets = cue.name[len(action) :].split(',')
