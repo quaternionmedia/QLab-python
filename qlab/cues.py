@@ -138,6 +138,10 @@ class Cues:
         return cue
 
     def sound_cue(self, cue: QLabCue):
+        """Create a sound cue"""
+        if cue.name.startswith('fade'):
+            # TODO: Implement fade cues
+            return
         assert cue.name.startswith(('mute', 'unmute')), ValueError(
             'Sound cues must begin with "mute" or "unmute"', cue
         )
@@ -147,6 +151,9 @@ class Cues:
         targets = [t.strip() for t in targets]
         print('sound cue', action, targets)
         for n, target in enumerate(targets):
+            if target not in self.channels:
+                print('unknown target', target)
+                continue
             cue_number = f'{cue.number}.{n}'
             if cue_number not in self.cues:
                 sound_cue = self.create_cue(
