@@ -6,7 +6,10 @@ from typing_extensions import Literal
 
 from qlab import QLab
 
-TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group']
+# QLab cue types
+QLAB_TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List']
+
+# CueList layer types
 LAYERS = Literal['Lights', 'Sound', 'Video', 'Music']
 
 NOTE_ON = 0x90
@@ -29,64 +32,78 @@ CUE_TYPES = {
 
 
 class Cue(BaseModel):
-    id: UUID | None = Field(None, alias='uniqueID')
-    type: TYPES
+    """Abstract cue from a csv export from CueList
 
+    Attributes:
+        Page Number
+        Layer Title
+        Cue Number
+        Label
+        Work Note
+    """
+
+    page: int | None = Field(None, alias='Page Number')
     layer: LAYERS | None = Field(None, alias='Layer Title')
-
     number: str | None = Field(None, alias='Cue Number')
     name: str | None = Field(None, alias='Label')
+    notes: str | None = Field(None, alias='Work Note')
+
+
+class QLabCue(BaseModel):
+    """QLab cue"""
+
+    id: UUID | None = Field(None, alias='uniqueID')
+    type: QLAB_TYPES
+    layer: LAYERS | None = None
+
+    number: str | None = None
+    name: str | None = None
     notes: str | None = None
+    cues: list['QLabCue'] | None = None
+    colorName: str | None = None
+    armed: bool | None = None
 
 
-def open_csv(csv):
+def open_csv(csv: str) -> list[Cue]:
     with open(csv, 'r') as f:
         reader = DictReader(f)
-        return list(reader)
+        return [Cue(**l) for l in list(reader)]
 
 
-def parse_cuelist(cuelist):
-    """Parse a QLab cuelist into a dictionary of cues"""
-    parsed = {}
-    for cue in cuelist['cues']:
-        if cue.get('cues'):
-            # print('nested cuelist', cue)
-            parsed.update(parse_cuelist(cue))
-        # print('parsing cue', cue)
-        if not cue['number']:
+def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
+    """Flatten a QLab cuelist into a dictionary of cues by number"""
+    results = {cuelist.number: cuelist}
+    for cue in cuelist.cues:
+        if cue.cues:
+            # print('nested cuelist', cue.cues)
+            results.update(flatten_cuelist(cue))
+            # print('parsing cue', cuelist)
+        if not cue.number:
             continue
-        parsed[cue['number']] = Cue(**cue)
-    return parsed
+        results[cue.number] = cue
+    return results
 
 
 class Cues:
-    def __init__(self, csv: str, channels: dict = {}, **kwargs):
-        self.csv_cues = open_csv(csv)
+    def __init__(self, channels: dict = {}, **kwargs):
         self.channels = channels
         self.q = QLab(**kwargs)
-        self.get_cuelists()
+        self.cues = self.get_cuelists()
 
     def get_cuelists(self):
-        self.cuelists = self.q.send('/cueLists')['data']
-        self.cues = parse_cuelist(self.cuelists[0])
+        cuelists = [QLabCue(**cuelist) for cuelist in self.q.send('/cueLists')['data']]
+        return flatten_cuelist(cuelists[0])
 
-    def sync_cuelist(self):
+    def sync_cuelist(self, csv: str):
         """Synchronize the cuelist with the cues in the csv"""
-        # Refresh the cuelists
-        self.get_cuelists()
+        csv_cues = open_csv(csv)
         previous = None
-        for cue in self.csv_cues:
-            if not cue['Cue Number']:
+        for cue in csv_cues:
+            if not cue.number:
                 continue
-            cue_type = CUE_TYPES[cue['Layer Title']]
-            cue_layer = cue['Layer Title']
-            cue_number = LAYER_IDS[cue_layer] + cue['Cue Number']
-            q = Cue(
-                **cue,
-                type=cue_type,
-                notes=f'p{ int(cue["Page Number"]) + 1 }',
-            )
-            q.number = cue_number
+            q = QLabCue(**cue.model_dump(), type=CUE_TYPES[cue.layer])
+            q.number = f'{LAYER_IDS[cue.layer]}{cue.number}'
+            q.notes = f'p{ cue.page }{" - " + cue.notes if cue.notes else ""}'
 
             if q.number in self.cues:
                 print('updating', q)
@@ -95,7 +112,7 @@ class Cues:
                 print('creating cue', cue, q)
                 previous = self.create_cue(q, previous).id
 
-    def update_cue(self, cue: Cue):
+    def update_cue(self, cue: QLabCue):
         """Update a cue"""
         if not cue.id:
             cue.id = self.q.get_cue_property(cue.number, 'uniqueID')
@@ -120,19 +137,27 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
         return cue
 
-    def sound_cue(self, cue: Cue):
-        if not cue.name.startswith(('mute', 'unmute')):
-            raise ValueError('Sound cues must begin with "mute" or "unmute"', cue)
+    def sound_cue(self, cue: QLabCue):
+        """Create a sound cue"""
+        if cue.name.startswith('fade'):
+            # TODO: Implement fade cues
+            return
+        assert cue.name.startswith(('mute', 'unmute')), ValueError(
+            'Sound cues must begin with "mute" or "unmute"', cue
+        )
         action = cue.name.split(' ')[0]
         mute = action == 'mute'
         targets = cue.name[len(action) :].split(',')
         targets = [t.strip() for t in targets]
         print('sound cue', action, targets)
         for n, target in enumerate(targets):
+            if target not in self.channels:
+                print('unknown target', target)
+                continue
             cue_number = f'{cue.number}.{n}'
             if cue_number not in self.cues:
                 sound_cue = self.create_cue(
-                    Cue(type='MIDI', number=cue_number), previous=cue.id
+                    QLabCue(type='MIDI', number=cue_number), previous=cue.id
                 )
                 self.q.send(f'/move/{sound_cue.id}', [n, cue.id])
                 self.q.send(f'/cue_id/{sound_cue.id}/number', cue_number)
@@ -140,7 +165,7 @@ class Cues:
                 self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
                 self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
-    def create_cue(self, cue: Cue, previous: UUID = None):
+    def create_cue(self, cue: QLabCue, previous: UUID = None):
         """Create a cue"""
         value = cue.type.lower()
         # TODO We should be able to send /new type [previous]
