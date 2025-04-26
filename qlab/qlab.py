@@ -23,7 +23,7 @@ class QLab:
         return self.send(f'/cue/{cue_no}/{property}')['data']
 
     def set_cue_property(self, cue_no, name, value) -> None:
-        self.client.send_message('/cue/{cue_no}/{name}'.format(**locals()), value=value)
+        self.client.send_message(f'/cue/{cue_no}/{name}', value=value)
 
     def select_next_cue(self) -> str:
         self.client.send_message('/select/next')
