@@ -7,10 +7,10 @@ from typing_extensions import Literal
 from qlab import QLab
 
 # QLab cue types
-QLAB_TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List']
+QLAB_TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade']
 
 # CueList layer types
-LAYERS = Literal['Lights', 'Sound', 'Video', 'Music']
+LAYERS = Literal['Lights', 'Sound', 'Video', 'Audio', 'Stage']
 
 NOTE_ON = 0x90
 
@@ -18,16 +18,17 @@ LAYER_IDS = {
     'Lights': '',
     'Sound': 's',
     'Video': 'v',
-    'Music': 'a',
+    'Audio': 'a',
 }
 
 
 CUE_TYPES = {
     'Lights': 'Network',
-    'Sound': 'Group',
+    'Sound': 'Network',
     'MIDI': 'MIDI',
     'Video': 'Video',
-    'Music': 'Audio',
+    'Audio': 'Audio',
+    'Stage': 'Network'
 }
 
 
@@ -91,7 +92,8 @@ class Cues:
         self.cues = self.get_cuelists()
 
     def get_cuelists(self):
-        cuelists = [QLabCue(**cuelist) for cuelist in self.q.send('/cueLists')['data']]
+        data = self.q.send('/cueLists')['data']
+        cuelists = [QLabCue(**cuelist) for cuelist in data]
         return flatten_cuelist(cuelists[0])
 
     def sync_cuelist(self, csv: str):
@@ -125,56 +127,28 @@ class Cues:
 
         # Layer specific settings
         if cue.layer == 'Lights':
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         elif cue.layer == 'Sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
-            self.sound_cue(cue)
-            self.q.send(f'/cue_id/{cue.id}/midiNote', 127)
-        elif cue.layer == 'Music':
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'green')
+            self.q.send(f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}')
+        elif cue.layer == 'Audio':
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'Video':
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         return cue
 
-    def sound_cue(self, cue: QLabCue):
-        """Create a sound cue"""
-        if cue.name.startswith('fade'):
-            # TODO: Implement fade cues
-            return
-        assert cue.name.startswith(('mute', 'unmute')), ValueError(
-            'Sound cues must begin with "mute" or "unmute"', cue
-        )
-        action = cue.name.split(' ')[0]
-        mute = action == 'mute'
-        targets = cue.name[len(action) :].split(',')
-        targets = [t.strip() for t in targets]
-        print('sound cue', action, targets)
-        for n, target in enumerate(targets):
-            if target not in self.channels:
-                print('unknown target', target)
-                continue
-            cue_number = f'{cue.number}.{n}'
-            if cue_number not in self.cues:
-                sound_cue = self.create_cue(
-                    QLabCue(type='MIDI', number=cue_number), previous=cue.id
-                )
-                self.q.send(f'/move/{sound_cue.id}', [n, cue.id])
-                self.q.send(f'/cue_id/{sound_cue.id}/number', cue_number)
-                self.q.send(f'/cue_id/{sound_cue.id}/byte1', self.channels[target])
-                self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
-                self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
     def create_cue(self, cue: QLabCue, previous: UUID = None):
         """Create a cue"""
-        value = cue.type.lower()
+        cue_type = cue.type.lower()
         # TODO We should be able to send /new type [previous]
         # to create a new cue after the previous one, but it's not working.
         if previous:
-            value = [value, previous]
+            cue_type = [cue_type, previous]
         cue.id = self.q.send(
             '/new',
-            value,
+            cue_type,
         )['data']
         self.update_cue(cue)
         return cue
