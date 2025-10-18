@@ -129,9 +129,11 @@ class Cues:
         if cue.layer == 'Lights':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
+            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 1)
         elif cue.layer == 'Sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}')
+            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 2)
         elif cue.layer == 'Audio':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'Video':
