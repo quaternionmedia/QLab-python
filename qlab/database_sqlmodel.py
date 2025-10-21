@@ -201,66 +201,6 @@ class CueDatabase:
 
         return point
 
-    def add_mute_cue(
-        self,
-        character: str,
-        channels: str,
-        line_preview: str,
-        qlab_cue: Optional[str] = None,
-        dca: Optional[int] = None,
-    ) -> int:
-        """Add a character mute cue.
-
-        Args:
-            character: Character name to mute
-            channels: Comma-separated channel numbers
-            line_preview: Preview of dialogue line
-            qlab_cue: Associated QLab cue reference
-            dca: DCA number to assign channels to (1-12)
-
-        Returns:
-            The cue point that was inserted
-        """
-        name = f"mute {character}"
-        dca_channels = {dca: channels} if dca else None
-
-        return self.add_cue(
-            name=name,
-            dca_channels=dca_channels,
-            qlab_cue=qlab_cue,
-            colour=0,
-        )
-
-    def add_unmute_cue(
-        self,
-        character: str,
-        channels: str,
-        line_preview: str,
-        qlab_cue: Optional[str] = None,
-        dca: Optional[int] = None,
-    ) -> int:
-        """Add a character unmute cue.
-
-        Args:
-            character: Character name to unmute
-            channels: Comma-separated channel numbers
-            line_preview: Preview of dialogue line
-            qlab_cue: Associated QLab cue reference
-            dca: DCA number to assign channels to (1-12)
-
-        Returns:
-            The cue point that was inserted
-        """
-        name = f"unmute {character}"
-        dca_channels = {dca: channels} if dca else None
-
-        return self.add_cue(
-            name=name,
-            dca_channels=dca_channels,
-            qlab_cue=qlab_cue,
-            colour=0,
-        )
-
     def get_cue(self, point: int) -> Optional[Cue]:
         """Get a cue by its point number.
 

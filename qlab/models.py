@@ -8,7 +8,7 @@ class Config(SQLModel, table=True):
     """Configuration key-value store."""
 
     param: str = Field(primary_key=True)
-    value: Optional[str] = None
+    value: str | None = None
 
 
 class Cue(SQLModel, table=True):
@@ -22,57 +22,57 @@ class Cue(SQLModel, table=True):
 
     number: int = Field(default=999, primary_key=True)
     point: int = Field(default=0, primary_key=True)
-    name: Optional[str] = None
+    name: str | None = None
 
     # DCA channel assignments (comma-separated channel numbers)
-    dca01Channels: Optional[str] = None
-    dca02Channels: Optional[str] = None
-    dca03Channels: Optional[str] = None
-    dca04Channels: Optional[str] = None
-    dca05Channels: Optional[str] = None
-    dca06Channels: Optional[str] = None
-    dca07Channels: Optional[str] = None
-    dca08Channels: Optional[str] = None
-    dca09Channels: Optional[str] = None
-    dca10Channels: Optional[str] = None
-    dca11Channels: Optional[str] = None
-    dca12Channels: Optional[str] = None
+    dca01Channels: str | None = None
+    dca02Channels: str | None = None
+    dca03Channels: str | None = None
+    dca04Channels: str | None = None
+    dca05Channels: str | None = None
+    dca06Channels: str | None = None
+    dca07Channels: str | None = None
+    dca08Channels: str | None = None
+    dca09Channels: str | None = None
+    dca10Channels: str | None = None
+    dca11Channels: str | None = None
+    dca12Channels: str | None = None
 
     # DCA labels
-    dca01Label: Optional[str] = None
-    dca02Label: Optional[str] = None
-    dca03Label: Optional[str] = None
-    dca04Label: Optional[str] = None
-    dca05Label: Optional[str] = None
-    dca06Label: Optional[str] = None
-    dca07Label: Optional[str] = None
-    dca08Label: Optional[str] = None
-    dca09Label: Optional[str] = None
-    dca10Label: Optional[str] = None
-    dca11Label: Optional[str] = None
-    dca12Label: Optional[str] = None
+    dca01Label: str | None = None
+    dca02Label: str | None = None
+    dca03Label: str | None = None
+    dca04Label: str | None = None
+    dca05Label: str | None = None
+    dca06Label: str | None = None
+    dca07Label: str | None = None
+    dca08Label: str | None = None
+    dca09Label: str | None = None
+    dca10Label: str | None = None
+    dca11Label: str | None = None
+    dca12Label: str | None = None
 
     # Additional configuration
-    channelPositions: Optional[str] = None
-    channelProfiles: Optional[str] = None
-    fxMutes: Optional[str] = None
-    channelFX: Optional[str] = None
-    snippets: Optional[str] = None
-    qLabCue: Optional[str] = None
-    channelLevels: Optional[str] = None
-    scenes: Optional[str] = None
-    colour: Optional[int] = None
-    scenePoints: Optional[str] = None
+    channelPositions: str | None = None
+    channelProfiles: str | None = None
+    fxMutes: str | None = None
+    channelFX: str | None = None
+    snippets: str | None = None
+    qLabCue: str | None = None
+    channelLevels: str | None = None
+    scenes: str | None = None
+    colour: int | None = None
+    scenePoints: str | None = None
 
     # DCA 9-12 (added to match actual schema)
-    dca09Channels: Optional[str] = None
-    dca09Label: Optional[str] = None
-    dca10Channels: Optional[str] = None
-    dca10Label: Optional[str] = None
-    dca11Channels: Optional[str] = None
-    dca11Label: Optional[str] = None
-    dca12Channels: Optional[str] = None
-    dca12Label: Optional[str] = None
+    dca09Channels: str | None = None
+    dca09Label: str | None = None
+    dca10Channels: str | None = None
+    dca10Label: str | None = None
+    dca11Channels: str | None = None
+    dca11Label: str | None = None
+    dca12Channels: str | None = None
+    dca12Label: str | None = None
 
 
 class Profile(SQLModel, table=True):
@@ -80,12 +80,12 @@ class Profile(SQLModel, table=True):
 
     __tablename__ = "profiles"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    channel: Optional[int] = None
-    name: Optional[str] = None
-    label: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    channel: int | None = None
+    name: str | None = None
+    label: str | None = None
     default: int = Field(default=0, sa_column_kwargs={"name": "default"})
-    data: Optional[str] = None
+    data: str | None = None
 
 
 class Position(SQLModel, table=True):
@@ -93,12 +93,12 @@ class Position(SQLModel, table=True):
 
     __tablename__ = "positions"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: Optional[str] = None
-    shortName: Optional[str] = None
-    delay: Optional[float] = None
-    pan: Optional[float] = None
-    buses: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    name: str | None = None
+    shortName: str | None = None
+    delay: float | None = None
+    pan: float | None = None
+    buses: str | None = None
 
 
 class Ensemble(SQLModel, table=True):
@@ -106,10 +106,10 @@ class Ensemble(SQLModel, table=True):
 
     __tablename__ = "ensembles"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: Optional[str] = None
-    channels: Optional[str] = None
-    channelProfiles: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    name: str | None = None
+    channels: str | None = None
+    channelProfiles: str | None = None
 
 
 class Actor(SQLModel, table=True):
@@ -117,9 +117,9 @@ class Actor(SQLModel, table=True):
 
     __tablename__ = "actors"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    channel: Optional[int] = None
-    name: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    channel: int | None = None
+    name: str | None = None
     order: int = Field(default=0, sa_column_kwargs={"name": "order"})
     active: int = Field(default=0)
 
@@ -133,9 +133,9 @@ class ActorProfile(SQLModel, table=True):
 
     __tablename__ = "actorProfiles"
 
-    actor: Optional[int] = Field(default=None, primary_key=True)
-    profile: Optional[int] = Field(default=None, primary_key=True)
-    data: Optional[str] = None
+    actor: int | None = Field(default=None, primary_key=True)
+    profile: int | None = Field(default=None, primary_key=True)
+    data: str | None = None
 
 
 class ActorGroup(SQLModel, table=True):
@@ -143,9 +143,9 @@ class ActorGroup(SQLModel, table=True):
 
     __tablename__ = "actorGroups"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: Optional[str] = None
-    data: Optional[str] = None
+    id: int | None = Field(default=None, primary_key=True)
+    name: str | None = None
+    data: str | None = None
 
 
 class SnippetCache(SQLModel, table=True):
@@ -154,7 +154,7 @@ class SnippetCache(SQLModel, table=True):
     __tablename__ = "snippetCache"
 
     snippet: int = Field(primary_key=True)
-    name: Optional[str] = None
+    name: str | None = None
 
 
 class FXCache(SQLModel, table=True):
@@ -163,7 +163,7 @@ class FXCache(SQLModel, table=True):
     __tablename__ = "fxCache"
 
     fx: int = Field(primary_key=True)
-    name: Optional[str] = None
+    name: str | None = None
 
 
 class SceneCache(SQLModel, table=True):
@@ -173,4 +173,4 @@ class SceneCache(SQLModel, table=True):
 
     scene: int = Field(primary_key=True)
     point: int = Field(default=0)
-    name: Optional[str] = None
+    name: str | None = None
