@@ -84,7 +84,7 @@ class Profile(SQLModel, table=True):
     channel: int | None = None
     name: str | None = None
     label: str | None = None
-    default: int = Field(default=0, sa_column_kwargs={"name": "default"})
+    default: int = Field(default=1, sa_column_kwargs={"name": "default"})
     data: str | None = None
 
 
