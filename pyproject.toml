@@ -10,7 +10,7 @@ dependencies = [
     "sqlmodel>=0.0.27",
     "rich>=14.2.0",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.13"
 readme = "README.md"
 license = { text = "MIT" }
 
@@ -22,4 +22,4 @@ build-backend = "pdm.backend"
 distribution = true
 
 [tool.uv.sources]
-fountain = { git = "https://github.com/Tagirijus/fountain" }
+fountain = { git = "https://github.com/quaternionmedia/fountain", branch = "deduplicate" }

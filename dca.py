@@ -7,7 +7,7 @@ from qlab.database_sqlmodel import CueDatabase
 
 # from rich import print
 
-DATABASE = 'mix/seuss9.tmix'
+DATABASE = 'mix/seuss10.tmix'
 
 
 def open_script(
@@ -15,28 +15,7 @@ def open_script(
 ) -> fountain.Fountain:
     """Open and parse a Fountain script from a file path."""
     with open(file_path, 'r') as file:
-        f = fountain.Fountain(file.read())
-        f.parse()
-
-    # WORKAROUND: The fountain library appears to duplicate the script content.
-    # Detect where the script restarts by finding duplicate ACT I section headings
-    # and truncate the element list to only include the first instance.
-    act1_indices = [
-        i
-        for i, e in enumerate(f.elements)
-        if e.element_type == 'Section Heading' and e.element_text == 'ACT I'
-    ]
-
-    if len(act1_indices) > 1:
-        # Script is duplicated - keep only elements before the second ACT I
-        print(
-            f"Warning: Script contains {len(act1_indices)} ACT I headings. Removing duplicate content."
-        )
-        print(f"Original element count: {len(f.elements)}")
-        f.elements = f.elements[: act1_indices[1]]
-        print(f"Deduplicated element count: {len(f.elements)}")
-
-    return f
+        return fountain.Fountain(file.read())
 
 
 def split_characters(characters: str) -> list[str]:
