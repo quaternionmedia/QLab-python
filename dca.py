@@ -28,24 +28,29 @@ def split_characters(characters: str) -> list[str]:
     return characters.split(' & ')
 
 
-def speaks_within(book, character, n: int = 7):
+def speaks_within(book, character, n: int = 7, skip_first: bool = False):
     """Check if character speaks within next n dialogue blocks or before scene change.
 
     Args:
         book: List of script elements to search
         character: Character name to look for
         n: Number of dialogue blocks to look ahead
+        skip_first: If True, don't count the first dialogue block in the search
 
     Returns:
         True if character speaks within window, False otherwise
     """
     dialogues = 0
+    first_skipped = not skip_first
     for i, element in enumerate(book):
         if dialogues >= n:
             return False
         if element.element_type == 'Scene Heading':
             return False
         if element.element_type == 'Character':
+            if not first_skipped:
+                first_skipped = True
+                continue
             characters = split_characters(element.element_text)
             if character in characters:
                 return True
@@ -143,6 +148,12 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
     page = 0
     cue_number = 1
 
+    # Track current DCA state to copy to next cue
+    current_dca_state = {
+        'channels': {i: None for i in range(1, 13)},  # DCA number -> channel(s)
+        'labels': {i: None for i in range(1, 13)},  # DCA number -> label
+    }
+
     for i, element in enumerate(script.elements):
         # Track page numbers from comments
         if element.element_type == 'Comment':
@@ -171,18 +182,38 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
                 # Get channel for this character
                 channel = character_channels.get(character, '')
 
-                # Create mute cue
+                # Create mute cue with previous DCA state
                 cue = Cue(
                     number=cue_number,
                     point=0,
                     name=f"p{page} - Scene Change - {get_line_preview_end(script.elements[:i], 30)}",
                 )
-                # Set the DCA channels and/or label
-                # If character has channels, set them; if not (ensemble), set label only
+
+                # Copy all current DCA states to this cue
+                for dca_i in range(1, 13):
+                    if current_dca_state['channels'][dca_i] is not None:
+                        setattr(
+                            cue,
+                            f'dca{dca_i:02d}Channels',
+                            current_dca_state['channels'][dca_i],
+                        )
+                    if current_dca_state['labels'][dca_i] is not None:
+                        setattr(
+                            cue,
+                            f'dca{dca_i:02d}Label',
+                            current_dca_state['labels'][dca_i],
+                        )
+
+                # Update this DCA's state (mute/clear)
+                # If character has channels, clear them; if not (ensemble), clear label
                 if channel:
-                    setattr(cue, f'dca{dca_num:02d}Channels', str(channel))
+                    setattr(cue, f'dca{dca_num:02d}Channels', None)
+                    current_dca_state['channels'][dca_num] = None
                 else:
-                    setattr(cue, f'dca{dca_num:02d}Label', character)
+                    # Clear the label for ensemble groups
+                    setattr(cue, f'dca{dca_num:02d}Label', None)
+                    current_dca_state['labels'][dca_num] = None
+
                 cues.append(cue)
                 cue_number += 1
 
@@ -198,11 +229,15 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
             characters = split_characters(element.element_text)
             remaining_script = script.elements[i + 1 :]
 
+            # Collect all DCA changes for this dialogue block
+            characters_to_unmute = []
+            characters_to_mute = []
+
             # Process each character in this dialogue block
             for character in characters:
                 character = character.strip()
 
-                # Unmute character if not already active
+                # Track character if not already active
                 if character not in active_mics:
                     # Assign an available DCA
                     if available_dcas:
@@ -214,60 +249,91 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
                         dca_num = 1
 
                     dca_assignments[character] = dca_num
-
-                    # Get channel for this character
-                    channel = character_channels.get(character)
-
-                    # Create unmute cue
-                    cue = Cue(
-                        number=cue_number,
-                        point=0,
-                        name=f"p{page} - unmute {character} {get_line_preview_start(remaining_script, 30)}",
-                    )
-                    # Set the DCA channels and/or label
-                    # If character has channels, set them; if not (ensemble), set label only
-                    if channel:
-                        setattr(cue, f'dca{dca_num:02d}Channels', channel)
-                    else:
-                        setattr(cue, f'dca{dca_num:02d}Label', character)
-                    cues.append(cue)
-                    cue_number += 1
-
+                    characters_to_unmute.append(character)
                     active_mics.add(character)
 
             # Check all currently active characters to see if they should be muted
-            characters_to_mute = []
-            for active_character in active_mics:
+            # Exclude characters who are speaking in this current block
+            currently_speaking = set(char.strip() for char in characters)
+            for active_character in active_mics.copy():
+                # Don't check characters who are speaking right now
+                if active_character in currently_speaking:
+                    continue
                 # Check if this character speaks within the next 7 dialogue blocks
-                if not speaks_within(remaining_script, active_character, n=7):
+                # Skip the first block (current dialogue) when checking
+                if not speaks_within(
+                    script.elements[i:], active_character, n=7, skip_first=True
+                ):
                     characters_to_mute.append(active_character)
 
-            # Create mute cues for characters who won't speak soon
-            for character in characters_to_mute:
-                dca_num = dca_assignments[character]
+            # Create a single cue for all DCA changes in this block
+            if characters_to_unmute or characters_to_mute:
+                # Build cue name
+                unmute_names = (
+                    ', '.join(characters_to_unmute) if characters_to_unmute else ''
+                )
+                mute_names = ', '.join(characters_to_mute) if characters_to_mute else ''
 
-                # Get channel for this character
-                channel = character_channels.get(character, '')
+                if unmute_names and mute_names:
+                    cue_name = f'p{page} +{unmute_names} -{mute_names} "{get_line_preview_start(remaining_script, 30)}"'
+                elif unmute_names:
+                    cue_name = f'p{page} +{unmute_names} "{get_line_preview_start(remaining_script, 30)}"'
+                else:
+                    # For mute-only cues, use the current dialogue block's preview
+                    cue_name = f'p{page} -{mute_names} "{get_line_preview_start(remaining_script, 30)}"'
 
-                # Create mute cue
                 cue = Cue(
                     number=cue_number,
                     point=0,
-                    name=f"{page} - mute {character} {get_line_preview_end(remaining_script[:7], 30)}",
+                    name=cue_name,
                 )
-                # Set the DCA channels and/or label (None clears the channels)
-                # If character has channels, clear them; if not (ensemble), set label only
-                if channel:
-                    setattr(cue, f'dca{dca_num:02d}Channels', None)
-                else:
-                    setattr(cue, f'dca{dca_num:02d}Label', character)
+
+                # Copy all current DCA states to this cue
+                for dca_i in range(1, 13):
+                    if current_dca_state['channels'][dca_i] is not None:
+                        setattr(
+                            cue,
+                            f'dca{dca_i:02d}Channels',
+                            current_dca_state['channels'][dca_i],
+                        )
+                    if current_dca_state['labels'][dca_i] is not None:
+                        setattr(
+                            cue,
+                            f'dca{dca_i:02d}Label',
+                            current_dca_state['labels'][dca_i],
+                        )
+
+                # Apply all unmute changes
+                for character in characters_to_unmute:
+                    dca_num = dca_assignments[character]
+                    channel = character_channels.get(character)
+
+                    if channel:
+                        setattr(cue, f'dca{dca_num:02d}Channels', channel)
+                        current_dca_state['channels'][dca_num] = channel
+                    else:
+                        setattr(cue, f'dca{dca_num:02d}Label', character)
+                        current_dca_state['labels'][dca_num] = character
+
+                # Apply all mute changes
+                for character in characters_to_mute:
+                    dca_num = dca_assignments[character]
+                    channel = character_channels.get(character, '')
+
+                    if channel:
+                        setattr(cue, f'dca{dca_num:02d}Channels', None)
+                        current_dca_state['channels'][dca_num] = None
+                    else:
+                        setattr(cue, f'dca{dca_num:02d}Label', None)
+                        current_dca_state['labels'][dca_num] = None
+
+                    # Free up the DCA and remove from active
+                    available_dcas.add(dca_num)
+                    del dca_assignments[character]
+                    active_mics.discard(character)
+
                 cues.append(cue)
                 cue_number += 1
-
-                # Free up the DCA and remove from active
-                available_dcas.add(dca_num)
-                del dca_assignments[character]
-                active_mics.discard(character)
 
     return cues
 
