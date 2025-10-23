@@ -7,7 +7,7 @@ from qlab.database_sqlmodel import CueDatabase
 
 # from rich import print
 
-DATABASE = 'mix/seuss7.tmix'
+DATABASE = 'mix/seuss9.tmix'
 
 
 def open_script(
@@ -17,6 +17,25 @@ def open_script(
     with open(file_path, 'r') as file:
         f = fountain.Fountain(file.read())
         f.parse()
+
+    # WORKAROUND: The fountain library appears to duplicate the script content.
+    # Detect where the script restarts by finding duplicate ACT I section headings
+    # and truncate the element list to only include the first instance.
+    act1_indices = [
+        i
+        for i, e in enumerate(f.elements)
+        if e.element_type == 'Section Heading' and e.element_text == 'ACT I'
+    ]
+
+    if len(act1_indices) > 1:
+        # Script is duplicated - keep only elements before the second ACT I
+        print(
+            f"Warning: Script contains {len(act1_indices)} ACT I headings. Removing duplicate content."
+        )
+        print(f"Original element count: {len(f.elements)}")
+        f.elements = f.elements[: act1_indices[1]]
+        print(f"Deduplicated element count: {len(f.elements)}")
+
     return f
 
 
@@ -176,17 +195,13 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
 
             # Mute characters who won't speak first in new scene
             characters_to_mute = active_mics - first_speakers
-            for character in characters_to_mute:
-                dca_num = dca_assignments[character]
-
-                # Get channel for this character
-                channel = character_channels.get(character, '')
-
-                # Create mute cue with previous DCA state
+            if characters_to_mute:
+                # Create single cue with all mutes for scene change
+                mute_names = ', '.join(sorted(characters_to_mute))
                 cue = Cue(
                     number=cue_number,
                     point=0,
-                    name=f"p{page} - Scene Change - {get_line_preview_end(script.elements[:i], 30)}",
+                    name=f"p{page} -{mute_names}- Scene Change - {get_line_preview_end(script.elements[:i], 30)}",
                 )
 
                 # Copy all current DCA states to this cue
@@ -204,23 +219,26 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
                             current_dca_state['labels'][dca_i],
                         )
 
-                # Update this DCA's state (mute/clear)
-                # If character has channels, clear them; if not (ensemble), clear label
-                if channel:
-                    setattr(cue, f'dca{dca_num:02d}Channels', None)
-                    current_dca_state['channels'][dca_num] = None
-                else:
-                    # Clear the label for ensemble groups
-                    setattr(cue, f'dca{dca_num:02d}Label', None)
-                    current_dca_state['labels'][dca_num] = None
+                # Apply all mute changes
+                for character in characters_to_mute:
+                    dca_num = dca_assignments[character]
+                    channel = character_channels.get(character, '')
+
+                    # Update this DCA's state (mute/clear)
+                    if channel:
+                        setattr(cue, f'dca{dca_num:02d}Channels', None)
+                        current_dca_state['channels'][dca_num] = None
+                    else:
+                        setattr(cue, f'dca{dca_num:02d}Label', None)
+                        current_dca_state['labels'][dca_num] = None
+
+                    # Free up the DCA and remove from active
+                    available_dcas.add(dca_num)
+                    del dca_assignments[character]
+                    active_mics.discard(character)
 
                 cues.append(cue)
                 cue_number += 1
-
-                # Free up the DCA and remove from active
-                available_dcas.add(dca_num)
-                del dca_assignments[character]
-                active_mics.discard(character)
 
             continue
 
@@ -260,9 +278,9 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
                 if active_character in currently_speaking:
                     continue
                 # Check if this character speaks within the next 7 dialogue blocks
-                # Skip the first block (current dialogue) when checking
+                # Pass remaining script after current element
                 if not speaks_within(
-                    script.elements[i:], active_character, n=7, skip_first=True
+                    remaining_script, active_character, n=7, skip_first=False
                 ):
                     characters_to_mute.append(active_character)
 
@@ -275,12 +293,12 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
                 mute_names = ', '.join(characters_to_mute) if characters_to_mute else ''
 
                 if unmute_names and mute_names:
-                    cue_name = f'p{page} +{unmute_names} -{mute_names} "{get_line_preview_start(remaining_script, 30)}"'
+                    cue_name = f'p{page} +{unmute_names}+ -{mute_names}- "{get_line_preview_start(remaining_script, 30)}"'
                 elif unmute_names:
-                    cue_name = f'p{page} +{unmute_names} "{get_line_preview_start(remaining_script, 30)}"'
+                    cue_name = f'p{page} +{unmute_names}+ "{get_line_preview_start(remaining_script, 30)}"'
                 else:
                     # For mute-only cues, use the current dialogue block's preview
-                    cue_name = f'p{page} -{mute_names} "{get_line_preview_start(remaining_script, 30)}"'
+                    cue_name = f'p{page} -{mute_names}- "{get_line_preview_start(remaining_script, 30)}"'
 
                 cue = Cue(
                     number=cue_number,
@@ -339,7 +357,7 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
 
 
 if __name__ == '__main__':
-    from rich import print
+    # from rich import print
 
     script = open_script()
     cues = generate_dca_cues(script)
@@ -357,5 +375,9 @@ if __name__ == '__main__':
         # print(f"Cue {cue.number}: {cue.name:40s} {dca_info}")
         print(cue)
     with Session(CueDatabase(DATABASE).engine) as session:
+        # Delete existing cues before adding new ones
+        existing_cues = session.exec(select(Cue)).all()
+        for cue in existing_cues:
+            session.delete(cue)
         session.add_all(cues)
         session.commit()
