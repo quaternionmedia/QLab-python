@@ -236,7 +236,7 @@ wheels = [
 ]
 
 [[package]]
-name = "qlab-python"
+name = "qlab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
