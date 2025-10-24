@@ -16,10 +16,8 @@ license = { text = "MIT" }
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
 build-backend = "uv_build"
-
-[tool.pdm]
-distribution = true
-
+[tool.uv.build-backend]
+module-root = ""
 [tool.uv.sources]
 fountain = { git = "https://github.com/quaternionmedia/fountain", branch = "deduplicate" }
 
