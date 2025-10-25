@@ -111,6 +111,10 @@ def get_character_channels(db_path: str = DATABASE) -> dict[str, str]:
         profiles = session.exec(select(Profile)).all()
         for profile in profiles:
             character_channels[profile.name.upper()] = str(profile.channel)
+        # Load ensemble groups and map to comma-separated channel lists
+        ensembles = session.exec(select(Ensemble)).all()
+        for ensemble in ensembles:
+            character_channels[ensemble.name.upper()] = ensemble.channels
 
     return character_channels
 
@@ -336,27 +340,28 @@ def generate_dca_cues(script: fountain.Fountain, db_path: str = DATABASE) -> lis
 
 
 if __name__ == '__main__':
-    # from rich import print
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Generate DCA muting cues from a Fountain script'
+    )
+    parser.add_argument(
+        '--script',
+        default='../seussical/scripts/seussical.fountain',
+        help='Path to Fountain script file (default: ../seussical/scripts/seussical.fountain)',
+    )
+    parser.add_argument(
+        '--database',
+        default=DATABASE,
+        help=f'Path to .tmix database file (default: {DATABASE})',
+    )
+    args = parser.parse_args()
 
     script = open_script()
     cues = generate_dca_cues(script)
     print(f"Generated {len(cues)} DCA cues\n")
-    # # Print first 10 cues as sample with DCA assignments
-    for cue in cues[:10]:
-        # Find which DCA is assigned
-        dca_info = ""
-        for dca_num in range(1, 13):
-            channels = getattr(cue, f'dca{dca_num:02d}Channels', None)
-            label = getattr(cue, f'dca{dca_num:02d}Label', None)
-            if channels or label:
-                dca_info = f"DCA{dca_num} Ch{channels}: {label}"
-                break
-        # print(f"Cue {cue.number}: {cue.name:40s} {dca_info}")
-        print(cue)
+    print(cues[:1])
+
     with Session(CueDatabase(DATABASE).engine) as session:
-        # Delete existing cues before adding new ones
-        existing_cues = session.exec(select(Cue)).all()
-        for cue in existing_cues:
-            session.delete(cue)
-        session.add_all(cues)
+        session.add_all(cues[:1])
         session.commit()
