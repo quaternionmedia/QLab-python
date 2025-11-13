@@ -7,7 +7,9 @@ from typing_extensions import Literal
 from qlab import QLab
 
 # QLab cue types
-QLAB_TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade']
+QLAB_TYPES = Literal[
+    'Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade'
+]
 
 # CueList layer types
 LAYERS = Literal['Lights', 'Sound', 'Video', 'Audio', 'Stage']
@@ -28,7 +30,7 @@ CUE_TYPES = {
     'MIDI': 'MIDI',
     'Video': 'Video',
     'Audio': 'Audio',
-    'Stage': 'Network'
+    'Stage': 'Network',
 }
 
 
@@ -65,6 +67,17 @@ class QLabCue(BaseModel):
     armed: bool | None = None
 
 
+class QLabCueList(QLabCue):
+    number: str | None = None
+    id: UUID | None = Field(None, alias='uniqueID')
+    cues: list[QLabCue] | None = None
+    colorName: str | None = None
+    flagged: bool | None = None
+    name: str | None = None
+    listName: str | None = None
+    type: str = 'Cue List'
+
+
 def open_csv(csv: str) -> list[Cue]:
     with open(csv, 'r') as f:
         reader = DictReader(f)
@@ -89,12 +102,11 @@ class Cues:
     def __init__(self, channels: dict = {}, **kwargs):
         self.channels = channels
         self.q = QLab(**kwargs)
-        self.cues = self.get_cuelists()
+        self.cuelists = self.get_cuelists()
 
     def get_cuelists(self):
         data = self.q.send('/cueLists')['data']
-        cuelists = [QLabCue(**cuelist) for cuelist in data]
-        return flatten_cuelist(cuelists[0])
+        return [QLabCueList(**cuelist) for cuelist in data]
 
     def sync_cuelist(self, csv: str):
         """Synchronize the cuelist with the cues in the csv"""
@@ -132,14 +144,15 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 1)
         elif cue.layer == 'Sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
-            self.q.send(f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}')
+            self.q.send(
+                f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}'
+            )
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 2)
         elif cue.layer == 'Audio':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'Video':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         return cue
-
 
     def create_cue(self, cue: QLabCue, previous: UUID = None):
         """Create a cue"""
