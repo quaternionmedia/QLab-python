@@ -1,9 +1,9 @@
-from csv import DictReader
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
 
+from cuelist import CUE_TYPES, LAYER_IDS, LAYERS, Cue, open_csv
 from qlab import QLab
 
 # QLab cue types
@@ -11,45 +11,7 @@ QLAB_TYPES = Literal[
     'Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade'
 ]
 
-# CueList layer types
-LAYERS = Literal['Lights', 'Sound', 'Video', 'Audio', 'Stage']
-
 NOTE_ON = 0x90
-
-LAYER_IDS = {
-    'Lights': '',
-    'Sound': 's',
-    'Video': 'v',
-    'Audio': 'a',
-}
-
-
-CUE_TYPES = {
-    'Lights': 'Network',
-    'Sound': 'Network',
-    'MIDI': 'MIDI',
-    'Video': 'Video',
-    'Audio': 'Audio',
-    'Stage': 'Network',
-}
-
-
-class Cue(BaseModel):
-    """Abstract cue from a csv export from CueList
-
-    Attributes:
-        Page Number
-        Layer Title
-        Cue Number
-        Label
-        Work Note
-    """
-
-    page: int | None = Field(None, alias='Page Number')
-    layer: LAYERS | None = Field(None, alias='Layer Title')
-    number: str | None = Field(None, alias='Cue Number')
-    name: str | None = Field(None, alias='Label')
-    notes: str | None = Field(None, alias='Work Note')
 
 
 class QLabCue(BaseModel):
@@ -76,12 +38,6 @@ class QLabCueList(QLabCue):
     name: str | None = None
     listName: str | None = None
     type: str = 'Cue List'
-
-
-def open_csv(csv: str) -> list[Cue]:
-    with open(csv, 'r') as f:
-        reader = DictReader(f)
-        return [Cue(**l) for l in list(reader)]
 
 
 def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
