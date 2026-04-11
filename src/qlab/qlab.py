@@ -5,6 +5,7 @@ class QLab:
     def __init__(self, address='localhost', port=53000) -> None:
         self.client = Client(address, port)
         # self.server = Server('127.0.0.1', 51365)
+        self.send('/alwaysReply', 1)
 
     def send(self, message='/go', value=None) -> dict:
         self.client.send_message(message, value)

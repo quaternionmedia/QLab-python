@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -59,6 +61,10 @@ class Cues:
         self.channels = channels
         self.q = QLab(**kwargs)
         self.cuelists = self.get_cuelists()
+        self.cues: dict[str, QLabCue] = {}
+        for cl in self.cuelists:
+            if cl.cues:
+                self.cues.update(flatten_cuelist(cl))
 
     def get_cuelists(self):
         data = self.q.send('/cueLists')['data']
@@ -81,6 +87,45 @@ class Cues:
             else:
                 print('creating cue', cue, q)
                 previous = self.create_cue(q, previous).id
+
+    def sync_show_cues(self, show_cues: list) -> list[QLabCue]:
+        """Sync ShowRunner Cue models to QLab.
+
+        Converts each ShowRunner Cue into a QLabCue (applying layer prefixes
+        and cue-type mapping) then creates or updates the cue in QLab.
+
+        Args:
+            show_cues: List of ShowRunner Cue model instances.
+
+        Returns:
+            List of QLabCue objects that were synced.
+        """
+        synced: list[QLabCue] = []
+        previous = None
+        for cue in show_cues:
+            if not cue.layer:
+                continue
+            cue_type = cue.cue_type or CUE_TYPES.get(cue.layer, 'Network')
+            layer_prefix = LAYER_IDS.get(cue.layer, '')
+            cue_number = str(cue.number)
+            if cue.point:
+                cue_number += f'.{cue.point}'
+            qlab_number = f'{layer_prefix}{cue_number}'
+
+            q = QLabCue(
+                type=cue_type,
+                layer=cue.layer,
+                number=qlab_number,
+                name=cue.name,
+                notes=cue.notes,
+            )
+
+            if qlab_number in self.cues:
+                previous = self.update_cue(q).id
+            else:
+                previous = self.create_cue(q, previous).id
+            synced.append(q)
+        return synced
 
     def update_cue(self, cue: QLabCue):
         """Update a cue"""

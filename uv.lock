@@ -243,6 +243,23 @@ wheels = [
 ]
 
 [[package]]
+name = "cuelist"
+version = "0.1.0"
+source = { editable = "../Cuelist-python" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-multipart" },
+    { name = "showrunner" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "python-multipart" },
+    { name = "showrunner", editable = "../ShowRunner" },
+]
+
+[[package]]
 name = "docutils"
 version = "0.22.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1469,6 +1486,7 @@ name = "qlab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cuelist" },
     { name = "fountain" },
     { name = "pydantic" },
     { name = "python-osc" },
@@ -1483,10 +1501,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cuelist", editable = "../Cuelist-python" },
     { name = "fountain", git = "https://github.com/quaternionmedia/fountain?branch=deduplicate" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "python-osc", specifier = ">=1.8.3" },
-    { name = "showrunner", directory = "../ShowRunner" },
+    { name = "showrunner", editable = "../ShowRunner" },
     { name = "sqlmodel", specifier = ">=0.0.27" },
 ]
 
@@ -1518,7 +1537,7 @@ wheels = [
 [[package]]
 name = "showrunner"
 version = "0.1.0"
-source = { directory = "../ShowRunner" }
+source = { editable = "../ShowRunner" }
 dependencies = [
     { name = "fastapi" },
     { name = "nicegui" },

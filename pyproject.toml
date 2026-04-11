@@ -26,4 +26,4 @@ requires = ["uv_build>=0.9.5,<0.10.0"]
 build-backend = "uv_build"
 [tool.uv.sources]
 fountain = { git = "https://github.com/quaternionmedia/fountain", branch = "deduplicate" }
-showrunner = { path = "../ShowRunner" }
+showrunner = { path = "../ShowRunner", editable = true }
