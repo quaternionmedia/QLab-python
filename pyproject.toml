@@ -11,10 +11,14 @@ dependencies = [
   "pydantic>=2.8.2",
   "fountain>=0.1.3",
   "sqlmodel>=0.0.27",
+  "showrunner",
 ]
 
 [dependency-groups]
 dev = ["rich>=14.2.0"]
+
+[project.entry-points."showrunner"]
+qlab = "qlab.showrunner:plugin"
 
 
 [build-system]
@@ -22,3 +26,4 @@ requires = ["uv_build>=0.9.5,<0.10.0"]
 build-backend = "uv_build"
 [tool.uv.sources]
 fountain = { git = "https://github.com/quaternionmedia/fountain", branch = "deduplicate" }
+showrunner = { path = "../ShowRunner" }
