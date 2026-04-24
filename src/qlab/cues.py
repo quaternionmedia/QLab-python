@@ -1,52 +1,19 @@
-from csv import DictReader
+from __future__ import annotations
+
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
 
+from cuelist import CUE_TYPES, LAYER_IDS, LAYERS, Cue, open_csv
 from qlab import QLab
 
 # QLab cue types
-QLAB_TYPES = Literal['Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List']
-
-# CueList layer types
-LAYERS = Literal['Lights', 'Sound', 'Video', 'Music']
+QLAB_TYPES = Literal[
+    'Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade'
+]
 
 NOTE_ON = 0x90
-
-LAYER_IDS = {
-    'Lights': '',
-    'Sound': 's',
-    'Video': 'v',
-    'Music': 'a',
-}
-
-
-CUE_TYPES = {
-    'Lights': 'Network',
-    'Sound': 'Group',
-    'MIDI': 'MIDI',
-    'Video': 'Video',
-    'Music': 'Audio',
-}
-
-
-class Cue(BaseModel):
-    """Abstract cue from a csv export from CueList
-
-    Attributes:
-        Page Number
-        Layer Title
-        Cue Number
-        Label
-        Work Note
-    """
-
-    page: int | None = Field(None, alias='Page Number')
-    layer: LAYERS | None = Field(None, alias='Layer Title')
-    number: str | None = Field(None, alias='Cue Number')
-    name: str | None = Field(None, alias='Label')
-    notes: str | None = Field(None, alias='Work Note')
 
 
 class QLabCue(BaseModel):
@@ -64,10 +31,15 @@ class QLabCue(BaseModel):
     armed: bool | None = None
 
 
-def open_csv(csv: str) -> list[Cue]:
-    with open(csv, 'r') as f:
-        reader = DictReader(f)
-        return [Cue(**l) for l in list(reader)]
+class QLabCueList(QLabCue):
+    number: str | None = None
+    id: UUID | None = Field(None, alias='uniqueID')
+    cues: list[QLabCue] | None = None
+    colorName: str | None = None
+    flagged: bool | None = None
+    name: str | None = None
+    listName: str | None = None
+    type: str = 'Cue List'
 
 
 def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
@@ -88,11 +60,15 @@ class Cues:
     def __init__(self, channels: dict = {}, **kwargs):
         self.channels = channels
         self.q = QLab(**kwargs)
-        self.cues = self.get_cuelists()
+        self.cuelists = self.get_cuelists()
+        self.cues: dict[str, QLabCue] = {}
+        for cl in self.cuelists:
+            if cl.cues:
+                self.cues.update(flatten_cuelist(cl))
 
     def get_cuelists(self):
-        cuelists = [QLabCue(**cuelist) for cuelist in self.q.send('/cueLists')['data']]
-        return flatten_cuelist(cuelists[0])
+        data = self.q.send('/cueLists')['data']
+        return [QLabCueList(**cuelist) for cuelist in data]
 
     def sync_cuelist(self, csv: str):
         """Synchronize the cuelist with the cues in the csv"""
@@ -112,6 +88,45 @@ class Cues:
                 print('creating cue', cue, q)
                 previous = self.create_cue(q, previous).id
 
+    def sync_show_cues(self, show_cues: list) -> list[QLabCue]:
+        """Sync ShowRunner Cue models to QLab.
+
+        Converts each ShowRunner Cue into a QLabCue (applying layer prefixes
+        and cue-type mapping) then creates or updates the cue in QLab.
+
+        Args:
+            show_cues: List of ShowRunner Cue model instances.
+
+        Returns:
+            List of QLabCue objects that were synced.
+        """
+        synced: list[QLabCue] = []
+        previous = None
+        for cue in show_cues:
+            if not cue.layer:
+                continue
+            cue_type = cue.cue_type or CUE_TYPES.get(cue.layer, 'Network')
+            layer_prefix = LAYER_IDS.get(cue.layer, '')
+            cue_number = str(cue.number)
+            if cue.point:
+                cue_number += f'.{cue.point}'
+            qlab_number = f'{layer_prefix}{cue_number}'
+
+            q = QLabCue(
+                type=cue_type,
+                layer=cue.layer,
+                number=qlab_number,
+                name=cue.name,
+                notes=cue.notes,
+            )
+
+            if qlab_number in self.cues:
+                previous = self.update_cue(q).id
+            else:
+                previous = self.create_cue(q, previous).id
+            synced.append(q)
+        return synced
+
     def update_cue(self, cue: QLabCue):
         """Update a cue"""
         if not cue.id:
@@ -125,56 +140,31 @@ class Cues:
 
         # Layer specific settings
         if cue.layer == 'Lights':
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
+            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 1)
         elif cue.layer == 'Sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
-            self.sound_cue(cue)
-            self.q.send(f'/cue_id/{cue.id}/midiNote', 127)
-        elif cue.layer == 'Music':
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'green')
+            self.q.send(
+                f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}'
+            )
+            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 2)
+        elif cue.layer == 'Audio':
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'Video':
-            self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
+            self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         return cue
-
-    def sound_cue(self, cue: QLabCue):
-        """Create a sound cue"""
-        if cue.name.startswith('fade'):
-            # TODO: Implement fade cues
-            return
-        assert cue.name.startswith(('mute', 'unmute')), ValueError(
-            'Sound cues must begin with "mute" or "unmute"', cue
-        )
-        action = cue.name.split(' ')[0]
-        mute = action == 'mute'
-        targets = cue.name[len(action) :].split(',')
-        targets = [t.strip() for t in targets]
-        print('sound cue', action, targets)
-        for n, target in enumerate(targets):
-            if target not in self.channels:
-                print('unknown target', target)
-                continue
-            cue_number = f'{cue.number}.{n}'
-            if cue_number not in self.cues:
-                sound_cue = self.create_cue(
-                    QLabCue(type='MIDI', number=cue_number), previous=cue.id
-                )
-                self.q.send(f'/move/{sound_cue.id}', [n, cue.id])
-                self.q.send(f'/cue_id/{sound_cue.id}/number', cue_number)
-                self.q.send(f'/cue_id/{sound_cue.id}/byte1', self.channels[target])
-                self.q.send(f'/cue_id/{sound_cue.id}/byte2', 127 if mute else 1)
-                self.q.send(f'/cue_id/{sound_cue.id}/name', f'{action} {target}')
 
     def create_cue(self, cue: QLabCue, previous: UUID = None):
         """Create a cue"""
-        value = cue.type.lower()
+        cue_type = cue.type.lower()
         # TODO We should be able to send /new type [previous]
         # to create a new cue after the previous one, but it's not working.
         if previous:
-            value = [value, previous]
+            cue_type = [cue_type, previous]
         cue.id = self.q.send(
             '/new',
-            value,
+            cue_type,
         )['data']
         self.update_cue(cue)
         return cue
