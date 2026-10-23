@@ -1507,8 +1507,12 @@ dependencies = [
     { name = "fountain" },
     { name = "pydantic" },
     { name = "python-osc" },
-    { name = "showrunner" },
     { name = "sqlmodel" },
+]
+
+[package.optional-dependencies]
+showrunner = [
+    { name = "showrunner" },
 ]
 
 [package.dev-dependencies]
@@ -1522,9 +1526,10 @@ requires-dist = [
     { name = "fountain", git = "https://github.com/quaternionmedia/fountain?branch=deduplicate" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "python-osc", specifier = ">=1.8.3" },
-    { name = "showrunner", editable = "../ShowRunner" },
+    { name = "showrunner", marker = "extra == 'showrunner'", editable = "../ShowRunner" },
     { name = "sqlmodel", specifier = ">=0.0.27" },
 ]
+provides-extras = ["showrunner"]
 
 [package.metadata.requires-dev]
 dev = [

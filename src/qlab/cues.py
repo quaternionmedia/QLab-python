@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from typing_extensions import Literal
+from typing import Literal
 
 from qlab import QLab
 
@@ -14,15 +14,14 @@ QLAB_TYPES = Literal[
 
 NOTE_ON = 0x90
 
-# QLab number prefix and cue type per layer (layers come from ShowRunner)
-LAYER_IDS = {'Lights': '', 'Sound': 's', 'Video': 'v', 'Audio': 'a'}
+# QLab number prefix and cue type, keyed by ShowRunner layer type (layers.type)
+LAYER_IDS = {'lights': '', 'sound': 's', 'video': 'v', 'audio': 'a'}
 CUE_TYPES = {
-    'Lights': 'Network',
-    'Sound': 'Network',
-    'MIDI': 'MIDI',
-    'Video': 'Video',
-    'Audio': 'Audio',
-    'Stage': 'Network',
+    'lights': 'Network',
+    'sound': 'Network',
+    'video': 'Video',
+    'audio': 'Audio',
+    'stage': 'Network',
 }
 
 
@@ -80,7 +79,7 @@ class Cues:
         data = self.q.send('/cueLists')['data']
         return [QLabCueList(**cuelist) for cuelist in data]
 
-    def sync_show_cues(self, show_cues: list) -> list[QLabCue]:
+    def sync_show_cues(self, show_cues: list, layer_types: dict[str, str]) -> list[QLabCue]:
         """Sync ShowRunner Cue models to QLab.
 
         Converts each ShowRunner Cue into a QLabCue (applying layer prefixes
@@ -88,6 +87,7 @@ class Cues:
 
         Args:
             show_cues: List of ShowRunner Cue model instances.
+            layer_types: Maps layer name to ShowRunner layer type (from the layers table).
 
         Returns:
             List of QLabCue objects that were synced.
@@ -97,8 +97,9 @@ class Cues:
         for cue in show_cues:
             if not cue.layer:
                 continue
-            cue_type = cue.cue_type or CUE_TYPES.get(cue.layer, 'Network')
-            layer_prefix = LAYER_IDS.get(cue.layer, '')
+            layer = layer_types.get(cue.layer, 'generic')
+            cue_type = cue.cue_type or CUE_TYPES.get(layer, 'Network')
+            layer_prefix = LAYER_IDS.get(layer, '')
             cue_number = str(cue.number)
             if cue.point:
                 cue_number += f'.{cue.point}'
@@ -106,7 +107,7 @@ class Cues:
 
             q = QLabCue(
                 type=cue_type,
-                layer=cue.layer,
+                layer=layer,
                 number=qlab_number,
                 name=cue.name,
                 notes=cue.notes,
@@ -131,19 +132,19 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/notes', value=cue.notes)
 
         # Layer specific settings
-        if cue.layer == 'Lights':
+        if cue.layer == 'lights':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 1)
-        elif cue.layer == 'Sound':
+        elif cue.layer == 'sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
             self.q.send(
                 f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}'
             )
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 2)
-        elif cue.layer == 'Audio':
+        elif cue.layer == 'audio':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
-        elif cue.layer == 'Video':
+        elif cue.layer == 'video':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
         return cue
 

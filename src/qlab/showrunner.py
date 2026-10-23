@@ -5,6 +5,7 @@ from sqlmodel import select
 
 import showrunner
 from showrunner.models import Cue as ShowCue
+from showrunner.layers import get_layers
 from showrunner.models import CueList
 from showrunner.plugins.db import get_db
 
@@ -55,11 +56,12 @@ async def sync_cuelist(cue_list_id: int):
             .where(ShowCue.cue_list_id == cue_list_id)
             .order_by(ShowCue.sequence, ShowCue.number, ShowCue.point)
         ).all()
+        layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
 
     if not show_cues:
         return {"synced": 0, "cues": []}
 
-    synced = cues.sync_show_cues(show_cues)
+    synced = cues.sync_show_cues(show_cues, layer_types)
     return {
         "synced": len(synced),
         "cues": [q.model_dump() for q in synced],
