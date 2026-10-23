@@ -43,6 +43,10 @@ class QLab:
         print(cue_no)
         return cue_no
 
+    def network_patches(self) -> list[dict]:
+        """The workspace's network patches as ``{uniqueID, name}``. Patch N is the Nth entry (1-based)."""
+        return self.send('/settings/network/patchList')['data']
+
     def go(self) -> None:
         self.send()
 

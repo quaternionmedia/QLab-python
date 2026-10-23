@@ -4,7 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from qlab.cues import Cues, QLabCue, TypeMapping, render_osc, unknown_cue_types
+from qlab.cues import (
+    Cues,
+    MissingPatch,
+    QLabCue,
+    TypeMapping,
+    patch_numbers,
+    render_osc,
+    unknown_cue_types,
+)
 
 
 class FakeQLab:
@@ -130,7 +138,7 @@ def test_sync_follows_script_order(tmp_path, monkeypatch):
         def __init__(self):
             self.numbers = []
 
-        def sync_show_cues(self, show_cues, layer_types, types):
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
             self.numbers = [c.number for c in show_cues]
             return []
 
@@ -154,3 +162,155 @@ def test_silent_qlab_times_out_instead_of_blocking(monkeypatch):
             QLab('127.0.0.1', port)  # its /alwaysReply is never answered
     finally:
         server.close()
+
+
+def test_lights_and_sound_set_no_patch_unless_chosen():
+    c = make_cues()
+    c.sync_show_cues([show_cue('Lights'), show_cue('Fx Sound')], {'Lights': 'lights', 'Fx Sound': 'sound'})
+    assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
+
+
+def test_chosen_patch_number_is_sent_for_its_layer():
+    c = make_cues()
+    c.sync_show_cues(
+        [show_cue('Fx Sound')], {'Fx Sound': 'sound'}, patches={'Fx Sound': 2}
+    )
+    assert ('/cue_id/uuid-1/networkPatchNumber', 2) in c.q.sent
+
+
+def test_patch_for_another_layer_is_not_sent():
+    c = make_cues()
+    c.sync_show_cues([show_cue('Lights')], {'Lights': 'lights'}, patches={'Fx Sound': 2})
+    assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
+
+
+PATCHES = [{'uniqueID': 'ion-id', 'name': 'Ion'}, {'uniqueID': 'tm-id', 'name': 'TheatreMix'}]
+
+
+def test_patch_numbers_follow_list_position_and_skip_none():
+    chosen = {'Lights': 'ion-id', 'Fx Sound': 'tm-id', 'Stage': None}
+    assert patch_numbers(PATCHES, chosen) == {'Lights': 1, 'Fx Sound': 2}
+
+
+def test_patch_not_in_qlab_is_reported_by_layer():
+    with pytest.raises(MissingPatch) as e:
+        patch_numbers(PATCHES, {'Lights': 'gone-id', 'Fx Sound': 'tm-id'})
+    assert e.value.layers == ['Lights']
+
+
+def test_saved_patch_round_trips_and_sync_uses_its_number(tmp_path, monkeypatch):
+    from sqlmodel import SQLModel
+    from showrunner import models
+    from showrunner.database import ShowDatabase
+
+    import qlab.showrunner as sr
+    from qlab.showrunner import NetworkPatch, SavedPatches
+
+    db = ShowDatabase(tmp_path / 'show.db')
+    SQLModel.metadata.create_all(db.engine)
+    with db.session() as s:
+        show = models.Show(name='Test')
+        s.add(show)
+        s.commit()
+        cue_list = models.CueList(show_id=show.id)
+        s.add(cue_list)
+        s.add(models.Layer(show_id=show.id, name='Lights', type='lights'))
+        s.commit()
+        s.add(models.Cue(cue_list_id=cue_list.id, number='1', layer='Lights'))
+        s.commit()
+        show_id, cue_list_id = show.id, cue_list.id
+
+    monkeypatch.setattr(sr, 'get_db', lambda: db)
+    saved = SavedPatches(
+        layers={'Lights': NetworkPatch(uniqueID='tm-id', name='TheatreMix'), 'Fx': None},
+        cue_types={'TheatreMix': NetworkPatch(uniqueID='ion-id', name='Ion')},
+    )
+    sr.save_patches(show_id, saved)
+    assert sr.load_patches(show_id) == saved
+
+    class FakeQ:
+        def network_patches(self):
+            return PATCHES
+
+    class Recorder:
+        q = FakeQ()
+        patches = None
+
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
+            self.patches = patches
+            return []
+
+    cues = Recorder()
+    sr.sync_cue_list(cues, cue_list_id, patches={'Lights': 'tm-id'})
+    assert cues.patches == {'Lights': 2}
+
+    with pytest.raises(MissingPatch):
+        sr.sync_cue_list(cues, cue_list_id, patches={'Lights': 'gone-id'})
+
+
+def test_mapped_network_type_takes_the_patch_from_its_mapping():
+    c = make_cues()
+    cue = show_cue('Projector')
+    cue.cue_type = 'TheatreMix'
+    mapping = {'TheatreMix': TypeMapping(type='Network', patch='tm-id')}
+    c.sync_show_cues([cue], {'Projector': 'video'}, mapping, type_patches={'TheatreMix': 3})
+    assert ('/cue_id/uuid-1/networkPatchNumber', 3) in c.q.sent
+
+
+def test_mapped_type_without_patch_is_not_given_its_layers_patch():
+    c = make_cues()
+    cue = show_cue('Lights')
+    cue.cue_type = 'TheatreMix'
+    mapping = {'TheatreMix': TypeMapping(type='Network')}
+    c.sync_show_cues([cue], {'Lights': 'lights'}, mapping, patches={'Lights': 1})
+    assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
+
+
+def test_non_network_cue_on_a_network_layer_gets_no_patch():
+    c = make_cues()
+    cue = show_cue('Lights')
+    cue.cue_type = 'MIDI'
+    c.sync_show_cues([cue], {'Lights': 'lights'}, patches={'Lights': 1})
+    assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
+
+
+def test_sync_resolves_mapped_type_patch_to_its_number(tmp_path, monkeypatch):
+    from sqlmodel import SQLModel
+    from showrunner import models
+    from showrunner.database import ShowDatabase
+
+    import qlab.showrunner as sr
+
+    db = ShowDatabase(tmp_path / 'show.db')
+    SQLModel.metadata.create_all(db.engine)
+    with db.session() as s:
+        show = models.Show(name='Test')
+        s.add(show)
+        s.commit()
+        cue_list = models.CueList(show_id=show.id)
+        s.add(cue_list)
+        s.add(models.Layer(show_id=show.id, name='Projector', type='video'))
+        s.commit()
+        s.add(models.Cue(cue_list_id=cue_list.id, number='1', layer='Projector',
+                         cue_type='TheatreMix'))
+        s.commit()
+        cue_list_id = cue_list.id
+
+    monkeypatch.setattr(sr, 'get_db', lambda: db)
+
+    class FakeQ:
+        def network_patches(self):
+            return PATCHES
+
+    class Recorder:
+        q = FakeQ()
+        type_patches = None
+
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
+            self.type_patches = type_patches
+            return []
+
+    cues = Recorder()
+    types = {'TheatreMix': TypeMapping(type='Network', patch='tm-id')}
+    sr.sync_cue_list(cues, cue_list_id, types=types)
+    assert cues.type_patches == {'TheatreMix': 2}

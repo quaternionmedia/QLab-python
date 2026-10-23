@@ -30,6 +30,29 @@ class TypeMapping(BaseModel):
     type: QLAB_TYPES
     color: str | None = None  # QLab colour name, e.g. 'orange'
     osc: str | None = None  # sent as the cue's custom string (Network cues); see render_osc
+    patch: str | None = None  # QLab network patch uniqueID (Network cues); None: no patch
+
+
+class MissingPatch(Exception):
+    """Layers whose chosen network patch is no longer in QLab. ``layers`` lists them."""
+
+    def __init__(self, layers: list[str]):
+        super().__init__(f'network patch not found in QLab for: {", ".join(layers)}')
+        self.layers = layers
+
+
+def patch_numbers(patches: list[dict], chosen: dict[str, str | None]) -> dict[str, int]:
+    """Map each layer's chosen patch ``uniqueID`` to QLab's patch number (1-based list position).
+
+    ``patches`` is QLab's network patch list; layers chosen as None get no number.
+    Raises ``MissingPatch`` if a chosen patch is not in the list.
+    """
+    numbers = {p['uniqueID']: n for n, p in enumerate(patches, 1)}
+    chosen = {layer: pid for layer, pid in chosen.items() if pid}
+    missing = [layer for layer, pid in chosen.items() if pid not in numbers]
+    if missing:
+        raise MissingPatch(missing)
+    return {layer: numbers[pid] for layer, pid in chosen.items()}
 
 
 def render_osc(template: str, cue: QLabCue) -> str:
@@ -65,6 +88,7 @@ class QLabCue(BaseModel):
     colorName: str | None = None
     customString: str | None = None
     armed: bool | None = None
+    patch: int | None = None  # network patch number; None leaves QLab's patch as it is
 
 
 class QLabCueList(QLabCue):
@@ -111,6 +135,8 @@ class Cues:
         show_cues: list,
         layer_types: dict[str, str],
         type_overrides: dict[str, TypeMapping] | None = None,
+        patches: dict[str, int] | None = None,
+        type_patches: dict[str, int] | None = None,
     ) -> list[QLabCue]:
         """Sync ShowRunner Cue models to QLab.
 
@@ -121,6 +147,9 @@ class Cues:
             show_cues: List of ShowRunner Cue model instances.
             layer_types: Maps layer name to ShowRunner layer type (from the layers table).
             type_overrides: Maps a non-QLab cue type to how it is sent to QLab.
+            patches: Maps layer name to the network patch number its cues use (see patch_numbers).
+            type_patches: Maps a non-QLab cue type to the network patch number its mapping chose.
+                A mapped cue takes its patch from its mapping only, never from its layer.
 
         Returns:
             List of QLabCue objects that were synced.
@@ -145,12 +174,18 @@ class Cues:
                 cue_number += f'.{cue.point}'
             qlab_number = f'{layer_prefix}{cue_number}'
 
+            # Only Network cues take a patch
+            if mapping:
+                patch = (type_patches or {}).get(cue.cue_type)
+            else:
+                patch = (patches or {}).get(cue.layer)
             q = QLabCue(
                 type=cue_type,
                 layer=layer,
                 number=qlab_number,
                 name=cue.name,
                 notes=cue.notes,
+                patch=patch if cue_type == 'Network' else None,
             )
             if mapping:
                 q.colorName = mapping.color
@@ -178,13 +213,11 @@ class Cues:
         if cue.layer == 'lights':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'orange')
             self.q.send(f'/cue_id/{cue.id}/customString', f'/eos/cue/{cue.number}/fire')
-            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 1)
         elif cue.layer == 'sound':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'blue')
             self.q.send(
                 f'/cue_id/{cue.id}/customString', f'/jump {cue.number.replace("s", "")}'
             )
-            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', 2)
         elif cue.layer == 'audio':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'video':
@@ -194,6 +227,8 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/colorName', cue.colorName)
         if cue.customString:
             self.q.send(f'/cue_id/{cue.id}/customString', cue.customString)
+        if cue.patch:
+            self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', cue.patch)
         return cue
 
     def create_cue(self, cue: QLabCue, previous: UUID = None):
