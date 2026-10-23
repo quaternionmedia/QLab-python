@@ -10,8 +10,11 @@ Settings live per show in the DB (key ``qlab.settings``), falling back to
     ports = [{ name = "out", address = "192.168.1.20", port = 53000 }]
 """
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import Field, model_validator
+import asyncio
+import threading
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from showrunner.connection import (
@@ -29,7 +32,7 @@ from showrunner.models import Cue as ShowCue
 from showrunner.models import CueList
 from showrunner.plugins.db import get_db
 
-from qlab.cues import Cues
+from qlab.cues import QLAB_TYPE_NAMES, Cues, TypeMapping, unknown_cue_types
 from qlab.qlab import QLab
 
 router = APIRouter(prefix="/qlab", tags=["QLab"])
@@ -110,10 +113,25 @@ def _get_cues() -> Cues:
         raise HTTPException(503, f'QLab not connected: {e.args[0]}')
 
 
-def sync_cue_list(cues: Cues, cue_list_id: int, layers: list[str] | None = None) -> dict:
+class UnknownCueTypes(Exception):
+    """Cue types QLab cannot create and no QLab type was chosen for. ``types`` maps type -> count."""
+
+    def __init__(self, types: dict[str, int]):
+        super().__init__(f'unknown cue types: {", ".join(types)}')
+        self.types = types
+
+
+def sync_cue_list(
+    cues: Cues,
+    cue_list_id: int,
+    layers: list[str] | None = None,
+    types: dict[str, TypeMapping] | None = None,
+) -> dict:
     """Push a ShowRunner cue list to QLab, optionally only cues on the named layers.
 
-    ``layers=None`` syncs every layer. Raises ``ValueError`` if the cue list is missing.
+    ``layers=None`` syncs every layer. ``types`` maps each non-QLab cue type to how it is sent.
+    Raises ``ValueError`` if the cue list is missing, ``UnknownCueTypes`` if a cue type
+    is neither a QLab type nor in ``types``.
     """
     db = get_db()
     with db.session() as s:
@@ -123,31 +141,56 @@ def sync_cue_list(cues: Cues, cue_list_id: int, layers: list[str] | None = None)
         show_cues = s.exec(
             select(ShowCue)
             .where(ShowCue.cue_list_id == cue_list_id)
-            .order_by(ShowCue.sequence, ShowCue.number, ShowCue.point)
+            # script order; unpositioned cues last, by sequence and number
+            .order_by(ShowCue.script_line.is_(None), ShowCue.script_line, ShowCue.script_char,
+                      ShowCue.sequence, ShowCue.number, ShowCue.point)
         ).all()
         layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
     if layers is not None:
         show_cues = [c for c in show_cues if c.layer in layers]
+    types = types or {}
+    missing = {t: n for t, n in unknown_cue_types(show_cues).items() if t not in types}
+    if missing:
+        raise UnknownCueTypes(missing)
     if not show_cues:
         return {'synced': 0, 'cues': []}
-    synced = cues.sync_show_cues(show_cues, layer_types)
+    synced = cues.sync_show_cues(show_cues, layer_types, types)
     return {'synced': len(synced), 'cues': [q.model_dump() for q in synced]}
 
 
+_sync_lock = threading.Lock()  # the blocking event loop used to serialise syncs; keep that
+
+
+def _sync_locked(cue_list_id: int, layers: list[str] | None, types: dict | None) -> dict:
+    """Run sync_cue_list in a worker thread. Reads QLab's cues inside the lock, so a second
+    sync sees what the first one created."""
+    with _sync_lock:
+        return sync_cue_list(_get_cues(), cue_list_id, layers, types)
+
+
+class SyncRequest(BaseModel):
+    layers: list[str] | None = None  # None: every layer
+    types: dict[str, TypeMapping] = Field(default_factory=dict)  # non-QLab type -> how to send
+
+
 @router.post("/sync/{cue_list_id}")
-async def sync_cuelist(cue_list_id: int, layers: list[str] | None = Query(None)):
+def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
     """Sync a ShowRunner cue list to the connected QLab instance.
 
-    ``?layers=Lights&layers=Sound`` limits the sync to those layers; omit to sync all.
+    409 with ``unknown_types`` (type -> cue count) if a cue type needs a ``types`` mapping.
     """
+    # Plain def, not async def: FastAPI runs it in a thread, QLab replies block
+    body = body or SyncRequest()
     try:
-        return sync_cue_list(_get_cues(), cue_list_id, layers)
+        return _sync_locked(cue_list_id, body.layers, body.types)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except UnknownCueTypes as e:
+        raise HTTPException(409, {'unknown_types': e.types})
 
 
 @router.get("/cuelists")
-async def list_qlab_cuelists():
+def list_qlab_cuelists():  # plain def: runs in a thread (see sync_cuelist)
     """List cue lists from the connected QLab instance."""
     cues = _get_cues()
     return [cl.model_dump() for cl in cues.cuelists]
@@ -187,7 +230,7 @@ class QLabPage(ConnectionPage):
             with ui.row().classes('w-full items-center gap-2'):
                 ui.select(cue_lists, label='Cue list', value=state['cue_list'],
                           on_change=lambda e: state.update(cue_list=e.value)).classes('w-64')
-                ui.button('Sync', icon='sync', on_click=lambda: self._sync(ui, state)
+                ui.button('Sync', icon='sync', on_click=lambda: _run_sync(ui, state)
                           ).props('color=primary')
             with ui.row().classes('w-full items-center gap-2'):
                 ui.label('Layers:')
@@ -195,14 +238,48 @@ class QLabPage(ConnectionPage):
                     ui.checkbox(name, value=True, on_change=lambda e, n=name: (
                         state['layers'].add(n) if e.value else state['layers'].discard(n)))
 
-    @staticmethod
-    def _sync(ui, state: dict) -> None:
-        try:
-            result = sync_cue_list(_get_cues(), state['cue_list'], sorted(state['layers']))
-        except Exception as e:  # HTTPException (not connected) or a QLab error
-            ui.notify(str(getattr(e, 'detail', e)), type='negative', multi_line=True)
-            return
-        ui.notify(f"Synced {result['synced']} cue(s)", type='positive')
+
+async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None) -> None:
+    try:
+        # QLab I/O blocks: keep it off the event loop so the server keeps serving
+        result = await asyncio.to_thread(
+            _sync_locked, state['cue_list'], sorted(state['layers']), types)
+    except UnknownCueTypes as e:
+        _ask_qlab_types(ui, state, e.types)
+        return
+    except Exception as e:  # HTTPException (not connected) or a QLab error
+        ui.notify(str(getattr(e, 'detail', e)), type='negative', multi_line=True)
+        return
+    ui.notify(f"Synced {result['synced']} cue(s)", type='positive')
+
+
+def _ask_qlab_types(ui, state: dict, unknown: dict[str, int]) -> None:
+    """Dialog: choose the QLab type, colour and OSC command for each unknown cue type, then sync."""
+    chosen = {t: TypeMapping(type='Network') for t in unknown}
+    with ui.dialog() as dialog, ui.card().classes('min-w-96'):
+        ui.label('Unknown cue types').classes('text-h6')
+        ui.label('QLab has no type for these. Choose how each one is sent:').classes('text-grey')
+        for cue_type, count in unknown.items():
+            m = chosen[cue_type]
+            ui.separator()
+            ui.label(f'{cue_type} ({count} cue{"s" if count != 1 else ""})').classes('text-bold')
+            with ui.row().classes('w-full items-center'):
+                ui.select(list(QLAB_TYPE_NAMES), label='QLab type', value=m.type,
+                          on_change=lambda e, m=m: setattr(m, 'type', e.value)).classes('w-40')
+                ui.input('Colour', placeholder='e.g. orange', on_change=lambda e, m=m: setattr(
+                    m, 'color', e.value or None)).classes('grow')
+            ui.input('OSC command', placeholder='e.g. /eos/cue/{number}/fire',
+                     on_change=lambda e, m=m: setattr(m, 'osc', e.value or None)).classes('w-full')
+        ui.label('{number} (QLab number), {name} and {layer} are filled in per cue.'
+                 ).classes('text-caption text-grey')
+        async def sync_with_types():
+            dialog.close()
+            await _run_sync(ui, state, chosen)
+
+        with ui.row().classes('w-full justify-end'):
+            ui.button('Cancel', on_click=dialog.close).props('flat')
+            ui.button('Sync', on_click=sync_with_types).props('color=primary')
+    dialog.open()
 
 
 class QLabPlugin(ConnectionPlugin):

@@ -116,6 +116,8 @@ class Osc:
         data = b''
         while not data or data[-1] != ord(END):
             chunk, address = self.conn.recvfrom(2**16)
+            if not chunk:  # QLab closed the connection; without this the loop never ends
+                raise ConnectionError('QLab closed the connection')
             data += chunk
         return tcpParse(data)
 

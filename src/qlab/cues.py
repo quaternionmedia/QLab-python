@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -13,6 +15,28 @@ QLAB_TYPES = Literal[
 ]
 
 QLAB_TYPE_NAMES = get_args(QLAB_TYPES)
+
+
+def unknown_cue_types(show_cues: list) -> dict[str, int]:
+    """Cue types set in ShowRunner that QLab cannot create, with their cue counts."""
+    return dict(
+        Counter(c.cue_type for c in show_cues if c.cue_type and c.cue_type not in QLAB_TYPE_NAMES)
+    )
+
+
+class TypeMapping(BaseModel):
+    """How a non-QLab cue type is sent to QLab."""
+
+    type: QLAB_TYPES
+    color: str | None = None  # QLab colour name, e.g. 'orange'
+    osc: str | None = None  # sent as the cue's custom string (Network cues); see render_osc
+
+
+def render_osc(template: str, cue: QLabCue) -> str:
+    """Fill {number}, {name} and {layer} from the cue; other {words} stay as typed."""
+    values = {'number': cue.number, 'name': cue.name or '', 'layer': cue.layer or ''}
+    return re.sub(r'\{(\w+)\}', lambda m: values.get(m.group(1), m.group(0)), template)
+
 
 NOTE_ON = 0x90
 
@@ -39,6 +63,7 @@ class QLabCue(BaseModel):
     notes: str | None = None
     cues: list['QLabCue'] | None = None
     colorName: str | None = None
+    customString: str | None = None
     armed: bool | None = None
 
 
@@ -81,7 +106,12 @@ class Cues:
         data = self.q.send('/cueLists')['data']
         return [QLabCueList(**cuelist) for cuelist in data]
 
-    def sync_show_cues(self, show_cues: list, layer_types: dict[str, str]) -> list[QLabCue]:
+    def sync_show_cues(
+        self,
+        show_cues: list,
+        layer_types: dict[str, str],
+        type_overrides: dict[str, TypeMapping] | None = None,
+    ) -> list[QLabCue]:
         """Sync ShowRunner Cue models to QLab.
 
         Converts each ShowRunner Cue into a QLabCue (applying layer prefixes
@@ -90,6 +120,7 @@ class Cues:
         Args:
             show_cues: List of ShowRunner Cue model instances.
             layer_types: Maps layer name to ShowRunner layer type (from the layers table).
+            type_overrides: Maps a non-QLab cue type to how it is sent to QLab.
 
         Returns:
             List of QLabCue objects that were synced.
@@ -100,11 +131,13 @@ class Cues:
             if not cue.layer:
                 continue
             layer = layer_types.get(cue.layer, 'generic')
-            # A plugin's own cue type (e.g. 'TheatreMix') is not a QLab type: use the layer's
+            # A plugin's own cue type (e.g. 'TheatreMix') is not a QLab type: use its mapping,
+            # else the layer's
+            mapping = (type_overrides or {}).get(cue.cue_type)
             cue_type = (
                 cue.cue_type
                 if cue.cue_type in QLAB_TYPE_NAMES
-                else CUE_TYPES.get(layer, 'Network')
+                else mapping.type if mapping else CUE_TYPES.get(layer, 'Network')
             )
             layer_prefix = LAYER_IDS.get(layer, '')
             cue_number = str(cue.number)
@@ -119,6 +152,9 @@ class Cues:
                 name=cue.name,
                 notes=cue.notes,
             )
+            if mapping:
+                q.colorName = mapping.color
+                q.customString = render_osc(mapping.osc, q) if mapping.osc else None
 
             if qlab_number in self.cues:
                 previous = self.update_cue(q).id
@@ -153,6 +189,11 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/colorName', 'cyan')
         elif cue.layer == 'video':
             self.q.send(f'/cue_id/{cue.id}/colorName', 'purple')
+        # Per-type settings from the sync dialog win over the layer's
+        if cue.colorName:
+            self.q.send(f'/cue_id/{cue.id}/colorName', cue.colorName)
+        if cue.customString:
+            self.q.send(f'/cue_id/{cue.id}/customString', cue.customString)
         return cue
 
     def create_cue(self, cue: QLabCue, previous: UUID = None):

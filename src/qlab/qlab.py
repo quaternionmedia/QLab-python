@@ -8,8 +8,10 @@ class QLab:
         self.send('/alwaysReply', 1)
 
     def send(self, message='/go', value=None) -> dict:
-        self.client.send_message(message, value)
-        return self.client.get_message()
+        # Shared by threads: one request and its reply at a time
+        with self.client.lock:
+            self.client.send_message(message, value)
+            return self.client.get_message()
 
     def cue(self, cue) -> None:
         self.send('/cue/%s/start' % cue)
