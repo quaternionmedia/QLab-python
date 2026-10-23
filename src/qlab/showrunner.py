@@ -12,6 +12,7 @@ Settings live per show in the DB (key ``qlab.settings``), falling back to
 
 import asyncio
 import threading
+from contextlib import suppress
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -158,6 +159,34 @@ def sync_cue_list(
     return {'synced': len(synced), 'cues': [q.model_dump() for q in synced]}
 
 
+def _in_daemon_thread(fn, *args) -> asyncio.Future:
+    """Run ``fn`` in a daemon thread; the future resolves with its result or error.
+
+    Not asyncio.to_thread: its threads are joined at exit, so a long sync would block shutdown.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def settle(result, error):
+        if future.done():  # the waiting task may have been cancelled
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(result)
+
+    def run():
+        try:
+            outcome = (fn(*args), None)
+        except Exception as e:
+            outcome = (None, e)
+        with suppress(RuntimeError):  # loop already closed: the server is shutting down
+            loop.call_soon_threadsafe(settle, *outcome)
+
+    threading.Thread(target=run, daemon=True, name='qlab-io').start()
+    return future
+
+
 _sync_lock = threading.Lock()  # the blocking event loop used to serialise syncs; keep that
 
 
@@ -174,15 +203,14 @@ class SyncRequest(BaseModel):
 
 
 @router.post("/sync/{cue_list_id}")
-def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
+async def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
     """Sync a ShowRunner cue list to the connected QLab instance.
 
     409 with ``unknown_types`` (type -> cue count) if a cue type needs a ``types`` mapping.
     """
-    # Plain def, not async def: FastAPI runs it in a thread, QLab replies block
     body = body or SyncRequest()
     try:
-        return _sync_locked(cue_list_id, body.layers, body.types)
+        return await _in_daemon_thread(_sync_locked, cue_list_id, body.layers, body.types)
     except ValueError as e:
         raise HTTPException(404, str(e))
     except UnknownCueTypes as e:
@@ -190,9 +218,9 @@ def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
 
 
 @router.get("/cuelists")
-def list_qlab_cuelists():  # plain def: runs in a thread (see sync_cuelist)
+async def list_qlab_cuelists():
     """List cue lists from the connected QLab instance."""
-    cues = _get_cues()
+    cues = await _in_daemon_thread(_get_cues)
     return [cl.model_dump() for cl in cues.cuelists]
 
 
@@ -242,7 +270,7 @@ class QLabPage(ConnectionPage):
 async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None) -> None:
     try:
         # QLab I/O blocks: keep it off the event loop so the server keeps serving
-        result = await asyncio.to_thread(
+        result = await _in_daemon_thread(
             _sync_locked, state['cue_list'], sorted(state['layers']), types)
     except UnknownCueTypes as e:
         _ask_qlab_types(ui, state, e.types)

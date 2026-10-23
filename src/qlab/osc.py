@@ -12,6 +12,9 @@ ESC = b'\xdb'
 ESC_END = b'\xdc'
 ESC_ESC = b'\xdd'
 NULL = b'\x00'
+# A QLab that stops replying must not hold a request, or server shutdown, forever.
+# shortcut: one fixed timeout for every reply; a legitimately slow reply past it fails the request, raise it if QLab needs longer
+REPLY_TIMEOUT = 5.0  # seconds
 
 
 def oscParse(thing: bytes) -> str:  # turn osc message into python command
@@ -125,7 +128,7 @@ class Osc:
 class Client(Osc):  # TCP SLIP osc 1.1 connection
     def __init__(self, addr, port) -> None:
         # self.client = udp_client.UDPClient(addr, port) # for udp
-        self.conn = create_connection((addr, port))
+        self.conn = create_connection((addr, port), timeout=REPLY_TIMEOUT)
         self.lock = Lock()
 
     def send_message(self, message: str, value=None) -> None:

@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from qlab.cues import Cues, QLabCue, TypeMapping, render_osc, unknown_cue_types
 
 
@@ -135,3 +137,20 @@ def test_sync_follows_script_order(tmp_path, monkeypatch):
     cues = Recorder()
     sr.sync_cue_list(cues, cue_list_id)
     assert cues.numbers == ['3', '2', '1', '4']
+
+
+def test_silent_qlab_times_out_instead_of_blocking(monkeypatch):
+    # A QLab that accepts but never replies must fail fast, or shutdown waits on it forever
+    import socket
+
+    import qlab.osc
+    from qlab import QLab
+
+    monkeypatch.setattr(qlab.osc, 'REPLY_TIMEOUT', 0.2)
+    server = socket.create_server(('127.0.0.1', 0))
+    try:
+        port = server.getsockname()[1]
+        with pytest.raises(TimeoutError):
+            QLab('127.0.0.1', port)  # its /alwaysReply is never answered
+    finally:
+        server.close()

@@ -1,3 +1,6 @@
+from contextlib import suppress
+from socket import SHUT_RDWR
+
 from qlab.osc import Client
 
 
@@ -44,4 +47,7 @@ class QLab:
         self.send()
 
     def close(self) -> None:
+        # shutdown wakes a send that is waiting for its reply; close alone does not
+        with suppress(OSError):  # already disconnected
+            self.client.conn.shutdown(SHUT_RDWR)
         self.client.conn.close()
