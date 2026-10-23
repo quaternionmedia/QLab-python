@@ -40,3 +40,6 @@ class QLab:
 
     def go(self) -> None:
         self.send()
+
+    def close(self) -> None:
+        self.client.conn.close()

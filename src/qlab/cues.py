@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, get_args
 
 from qlab import QLab
 
@@ -11,6 +11,8 @@ from qlab import QLab
 QLAB_TYPES = Literal[
     'Network', 'MIDI', 'Video', 'Audio', 'Text', 'Group', 'Cue List', 'Cart', 'Fade'
 ]
+
+QLAB_TYPE_NAMES = get_args(QLAB_TYPES)
 
 NOTE_ON = 0x90
 
@@ -66,9 +68,9 @@ def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
 
 
 class Cues:
-    def __init__(self, channels: dict = {}, **kwargs):
+    def __init__(self, q: QLab, channels: dict = {}):
         self.channels = channels
-        self.q = QLab(**kwargs)
+        self.q = q
         self.cuelists = self.get_cuelists()
         self.cues: dict[str, QLabCue] = {}
         for cl in self.cuelists:
@@ -98,7 +100,12 @@ class Cues:
             if not cue.layer:
                 continue
             layer = layer_types.get(cue.layer, 'generic')
-            cue_type = cue.cue_type or CUE_TYPES.get(layer, 'Network')
+            # A plugin's own cue type (e.g. 'TheatreMix') is not a QLab type: use the layer's
+            cue_type = (
+                cue.cue_type
+                if cue.cue_type in QLAB_TYPE_NAMES
+                else CUE_TYPES.get(layer, 'Network')
+            )
             layer_prefix = LAYER_IDS.get(layer, '')
             cue_number = str(cue.number)
             if cue.point:
