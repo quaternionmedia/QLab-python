@@ -5,7 +5,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
 
-from cuelist import CUE_TYPES, LAYER_IDS, LAYERS, Cue, open_csv
 from qlab import QLab
 
 # QLab cue types
@@ -15,13 +14,24 @@ QLAB_TYPES = Literal[
 
 NOTE_ON = 0x90
 
+# QLab number prefix and cue type per layer (layers come from ShowRunner)
+LAYER_IDS = {'Lights': '', 'Sound': 's', 'Video': 'v', 'Audio': 'a'}
+CUE_TYPES = {
+    'Lights': 'Network',
+    'Sound': 'Network',
+    'MIDI': 'MIDI',
+    'Video': 'Video',
+    'Audio': 'Audio',
+    'Stage': 'Network',
+}
+
 
 class QLabCue(BaseModel):
     """QLab cue"""
 
     id: UUID | None = Field(None, alias='uniqueID')
     type: QLAB_TYPES
-    layer: LAYERS | None = None
+    layer: str | None = None
 
     number: str | None = None
     name: str | None = None
@@ -69,24 +79,6 @@ class Cues:
     def get_cuelists(self):
         data = self.q.send('/cueLists')['data']
         return [QLabCueList(**cuelist) for cuelist in data]
-
-    def sync_cuelist(self, csv: str):
-        """Synchronize the cuelist with the cues in the csv"""
-        csv_cues = open_csv(csv)
-        previous = None
-        for cue in csv_cues:
-            if not cue.number:
-                continue
-            q = QLabCue(**cue.model_dump(), type=CUE_TYPES[cue.layer])
-            q.number = f'{LAYER_IDS[cue.layer]}{cue.number}'
-            q.notes = f'p{ cue.page }{" - " + cue.notes if cue.notes else ""}'
-
-            if q.number in self.cues:
-                print('updating', q)
-                previous = self.update_cue(q).id
-            else:
-                print('creating cue', cue, q)
-                previous = self.create_cue(q, previous).id
 
     def sync_show_cues(self, show_cues: list) -> list[QLabCue]:
         """Sync ShowRunner Cue models to QLab.

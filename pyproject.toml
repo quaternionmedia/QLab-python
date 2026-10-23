@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["rich>=14.2.0"]
+dev = [
+    "rich>=14.2.0",
+    "typer>=0.27.3",
+]
 
 [project.entry-points."showrunner"]
 qlab = "qlab.showrunner:plugin"
