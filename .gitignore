@@ -1,3 +1,5 @@
 .venv
 .pdm-build
 __pycache__
+
+mix/

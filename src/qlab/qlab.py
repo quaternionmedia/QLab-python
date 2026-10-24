@@ -1,3 +1,6 @@
+from contextlib import suppress
+from socket import SHUT_RDWR
+
 from qlab.osc import Client
 
 
@@ -5,10 +8,13 @@ class QLab:
     def __init__(self, address='localhost', port=53000) -> None:
         self.client = Client(address, port)
         # self.server = Server('127.0.0.1', 51365)
+        self.send('/alwaysReply', 1)
 
     def send(self, message='/go', value=None) -> dict:
-        self.client.send_message(message, value)
-        return self.client.get_message()
+        # Shared by threads: one request and its reply at a time
+        with self.client.lock:
+            self.client.send_message(message, value)
+            return self.client.get_message()
 
     def cue(self, cue) -> None:
         self.send('/cue/%s/start' % cue)
@@ -37,5 +43,15 @@ class QLab:
         print(cue_no)
         return cue_no
 
+    def network_patches(self) -> list[dict]:
+        """The workspace's network patches as ``{uniqueID, name}``. Patch N is the Nth entry (1-based)."""
+        return self.send('/settings/network/patchList')['data']
+
     def go(self) -> None:
         self.send()
+
+    def close(self) -> None:
+        # shutdown wakes a send that is waiting for its reply; close alone does not
+        with suppress(OSError):  # already disconnected
+            self.client.conn.shutdown(SHUT_RDWR)
+        self.client.conn.close()
