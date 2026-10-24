@@ -31,6 +31,7 @@ class TypeMapping(BaseModel):
     color: str | None = None  # QLab colour name, e.g. 'orange'
     osc: str | None = None  # sent as the cue's custom string (Network cues); see render_osc
     patch: str | None = None  # QLab network patch uniqueID (Network cues); None: no patch
+    prefix: str | None = None  # QLab number prefix for this type's cues, e.g. 'tm' -> 'tm42'
 
 
 class MissingPatch(Exception):
@@ -39,6 +40,14 @@ class MissingPatch(Exception):
     def __init__(self, layers: list[str]):
         super().__init__(f'network patch not found in QLab for: {", ".join(layers)}')
         self.layers = layers
+
+
+class MissingPrefix(Exception):
+    """Cue types whose mapping has no QLab number prefix. ``types`` lists them."""
+
+    def __init__(self, types: list[str]):
+        super().__init__(f'no QLab number prefix for: {", ".join(types)}')
+        self.types = types
 
 
 def patch_numbers(patches: list[dict], chosen: dict[str, str | None]) -> dict[str, int]:
@@ -168,11 +177,12 @@ class Cues:
                 if cue.cue_type in QLAB_TYPE_NAMES
                 else mapping.type if mapping else CUE_TYPES.get(layer, 'Network')
             )
-            layer_prefix = LAYER_IDS.get(layer, '')
+            # A mapped cue is numbered with its mapping's prefix, not its layer's
+            prefix = (mapping.prefix or '') if mapping else LAYER_IDS.get(layer, '')
             cue_number = str(cue.number)
             if cue.point:
                 cue_number += f'.{cue.point}'
-            qlab_number = f'{layer_prefix}{cue_number}'
+            qlab_number = f'{prefix}{cue_number}'
 
             # Only Network cues take a patch
             if mapping:

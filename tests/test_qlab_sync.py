@@ -93,7 +93,7 @@ def test_type_mapping_sets_colour_and_osc_after_layer_colour():
     c = make_cues()
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
-    m = TypeMapping(type='Network', color='red', osc='/tm/{number}/{name}')
+    m = TypeMapping(type='Network', prefix='v', color='red', osc='/tm/{number}/{name}')
     c.sync_show_cues([cue], {'Projector': 'video'}, {'TheatreMix': m})
     assert ('/cue_id/uuid-1/customString', '/tm/v42/Cue') in c.q.sent
     assert [v for k, v in c.q.sent if k.endswith('/colorName')][-1] == 'red'
@@ -204,7 +204,7 @@ def test_saved_patch_round_trips_and_sync_uses_its_number(tmp_path, monkeypatch)
     from showrunner.database import ShowDatabase
 
     import qlab.showrunner as sr
-    from qlab.showrunner import NetworkPatch, SavedPatches
+    from qlab.showrunner import NetworkPatch, SavedChoices
 
     db = ShowDatabase(tmp_path / 'show.db')
     SQLModel.metadata.create_all(db.engine)
@@ -221,12 +221,13 @@ def test_saved_patch_round_trips_and_sync_uses_its_number(tmp_path, monkeypatch)
         show_id, cue_list_id = show.id, cue_list.id
 
     monkeypatch.setattr(sr, 'get_db', lambda: db)
-    saved = SavedPatches(
+    saved = SavedChoices(
         layers={'Lights': NetworkPatch(uniqueID='tm-id', name='TheatreMix'), 'Fx': None},
         cue_types={'TheatreMix': NetworkPatch(uniqueID='ion-id', name='Ion')},
+        cue_type_prefixes={'TheatreMix': 'tm'},
     )
-    sr.save_patches(show_id, saved)
-    assert sr.load_patches(show_id) == saved
+    sr.save_choices(show_id, saved)
+    assert sr.load_choices(show_id) == saved
 
     class FakeQ:
         def network_patches(self):
@@ -311,6 +312,50 @@ def test_sync_resolves_mapped_type_patch_to_its_number(tmp_path, monkeypatch):
             return []
 
     cues = Recorder()
-    types = {'TheatreMix': TypeMapping(type='Network', patch='tm-id')}
+    types = {'TheatreMix': TypeMapping(type='Network', prefix='tm', patch='tm-id')}
     sr.sync_cue_list(cues, cue_list_id, types=types)
     assert cues.type_patches == {'TheatreMix': 2}
+
+
+def test_mapped_type_is_numbered_with_its_own_prefix():
+    c = make_cues()
+    cue = show_cue('Projector')
+    cue.cue_type = 'TheatreMix'
+    mapping = {'TheatreMix': TypeMapping(type='Network', prefix='tm')}
+    synced = c.sync_show_cues([cue], {'Projector': 'video'}, mapping)
+    assert synced[0].number == 'tm42'
+
+
+def test_sync_refuses_an_unknown_type_without_a_prefix(tmp_path, monkeypatch):
+    from sqlmodel import SQLModel
+    from showrunner import models
+    from showrunner.database import ShowDatabase
+
+    import qlab.showrunner as sr
+    from qlab.cues import MissingPrefix
+
+    db = ShowDatabase(tmp_path / 'show.db')
+    SQLModel.metadata.create_all(db.engine)
+    with db.session() as s:
+        show = models.Show(name='Test')
+        s.add(show)
+        s.commit()
+        cue_list = models.CueList(show_id=show.id)
+        s.add(cue_list)
+        s.add(models.Layer(show_id=show.id, name='Projector', type='video'))
+        s.commit()
+        s.add(models.Cue(cue_list_id=cue_list.id, number='1', layer='Projector',
+                         cue_type='TheatreMix'))
+        s.commit()
+        cue_list_id = cue_list.id
+
+    monkeypatch.setattr(sr, 'get_db', lambda: db)
+
+    class Unused:
+        def sync_show_cues(self, *args):
+            raise AssertionError('must not sync without a prefix')
+
+    types = {'TheatreMix': TypeMapping(type='Network', prefix='')}
+    with pytest.raises(MissingPrefix) as e:
+        sr.sync_cue_list(Unused(), cue_list_id, types=types)
+    assert e.value.types == ['TheatreMix']

@@ -40,6 +40,7 @@ from qlab.cues import (
     QLAB_TYPE_NAMES,
     Cues,
     MissingPatch,
+    MissingPrefix,
     TypeMapping,
     patch_numbers,
     unknown_cue_types,
@@ -145,7 +146,8 @@ def sync_cue_list(
     ``patches`` maps a layer to the QLab network patch ``uniqueID`` its cues use; None or
     missing means no patch is set.
     Raises ``ValueError`` if the cue list is missing, ``UnknownCueTypes`` if a cue type
-    is neither a QLab type nor in ``types``, ``MissingPatch`` if a chosen patch is not in QLab.
+    is neither a QLab type nor in ``types``, ``MissingPrefix`` if a type in ``types`` has no
+    prefix, ``MissingPatch`` if a chosen patch is not in QLab.
     """
     db = get_db()
     with db.session() as s:
@@ -168,6 +170,10 @@ def sync_cue_list(
         raise UnknownCueTypes(missing)
     if not show_cues:
         return {'synced': 0, 'cues': []}
+    unprefixed = sorted({c.cue_type for c in show_cues
+                         if c.cue_type in types and not types[c.cue_type].prefix})
+    if unprefixed:
+        raise MissingPrefix(unprefixed)
     in_layers = {c.layer for c in show_cues}
     in_types = {c.cue_type for c in show_cues}
     layer_pick = {layer: pid for layer, pid in (patches or {}).items() if layer in in_layers and pid}
@@ -235,7 +241,8 @@ async def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
     """Sync a ShowRunner cue list to the connected QLab instance.
 
     409 with ``unknown_types`` (type -> cue count) if a cue type needs a ``types`` mapping,
-    or ``missing_patches`` (layers) if a chosen network patch is not in QLab.
+    ``missing_prefixes`` (types) if a mapping has no prefix, or ``missing_patches`` (layers)
+    if a chosen network patch is not in QLab.
     """
     body = body or SyncRequest()
     try:
@@ -245,6 +252,8 @@ async def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
         raise HTTPException(404, str(e))
     except UnknownCueTypes as e:
         raise HTTPException(409, {'unknown_types': e.types})
+    except MissingPrefix as e:
+        raise HTTPException(409, {'missing_prefixes': e.types})
     except MissingPatch as e:
         raise HTTPException(409, {'missing_patches': e.layers})
 
@@ -257,10 +266,10 @@ async def list_qlab_cuelists():
 
 
 # ---------------------------------------------------------------------------
-# Network patches chosen per show, saved in the DB
+# Sync choices made per show (network patches, unknown-type prefixes), saved in the DB
 # ---------------------------------------------------------------------------
 
-PATCHES_KEY = 'qlab.patches'  # DB Config key; kept apart from qlab.settings, which the
+CHOICES_KEY = 'qlab.patches'  # DB Config key; kept apart from qlab.settings, which the
 # connection page saves from its own draft and would overwrite this choice
 
 
@@ -272,28 +281,29 @@ class NetworkPatch(BaseModel):
     name: str
 
 
-class SavedPatches(BaseModel):
+class SavedChoices(BaseModel):
     layers: dict[str, NetworkPatch | None] = Field(default_factory=dict)  # layer -> patch
     cue_types: dict[str, NetworkPatch | None] = Field(default_factory=dict)  # unknown type
+    cue_type_prefixes: dict[str, str] = Field(default_factory=dict)  # unknown type -> prefix
 
 
-def load_patches(show_id: int | None) -> SavedPatches:
+def load_choices(show_id: int | None) -> SavedChoices:
     if show_id is None:
-        return SavedPatches()
+        return SavedChoices()
     with get_db().session() as s:
         row = s.exec(
-            select(Config).where(Config.show_id == show_id, Config.key == PATCHES_KEY)
+            select(Config).where(Config.show_id == show_id, Config.key == CHOICES_KEY)
         ).first()
-    return SavedPatches.model_validate_json(row.value) if row and row.value else SavedPatches()
+    return SavedChoices.model_validate_json(row.value) if row and row.value else SavedChoices()
 
 
-def save_patches(show_id: int, saved: SavedPatches) -> None:
+def save_choices(show_id: int, saved: SavedChoices) -> None:
     with get_db().session() as s:
         row = s.exec(
-            select(Config).where(Config.show_id == show_id, Config.key == PATCHES_KEY)
+            select(Config).where(Config.show_id == show_id, Config.key == CHOICES_KEY)
         ).first()
         if row is None:
-            row = Config(show_id=show_id, key=PATCHES_KEY)
+            row = Config(show_id=show_id, key=CHOICES_KEY)
         row.value = saved.model_dump_json()
         s.add(row)
         s.commit()
@@ -327,15 +337,16 @@ class QLabPage(ConnectionPage):
         # Layers whose cues are QLab Network cues, which are the ones that take a patch
         network_layers = [layer['name'] for layer in layers
                           if CUE_TYPES.get(layer['type'], 'Network') == 'Network']
-        saved = load_patches(show_id)
+        saved = load_choices(show_id)
         state = {'cue_list': next(iter(cue_lists), None), 'layers': set(layer_names),
                  'show_id': show_id, 'patches': saved.layers,
-                 'cue_type_patches': saved.cue_types, 'live': None}
+                 'cue_type_patches': saved.cue_types,
+                 'cue_type_prefixes': saved.cue_type_prefixes, 'live': None}
         pickers: dict[str, Any] = {}
 
         def choose_patch(layer: str, uid: str) -> None:
             if _choose(state['patches'], layer, uid, state['live']):
-                _save_patches(state)
+                _save_choices(state)
 
         async def refresh_patches() -> None:
             """Fill the patch pickers from QLab's current network list; without a connection,
@@ -352,7 +363,7 @@ class QLabPage(ConnectionPage):
                 for chosen in (*state['patches'].values(), *state['cue_type_patches'].values()):
                     if chosen and chosen.uniqueID in names:
                         chosen.name = names[chosen.uniqueID]
-                _save_patches(state)
+                _save_choices(state)
             for layer, picker in pickers.items():
                 chosen = state['patches'].get(layer)
                 picker.set_options(_patch_options(live, chosen),
@@ -422,10 +433,11 @@ def _choose(saved: dict[str, NetworkPatch | None], key: str, uid: str,
     return True
 
 
-def _save_patches(state: dict) -> None:
+def _save_choices(state: dict) -> None:
     if state['show_id'] is not None:
-        save_patches(state['show_id'], SavedPatches(
-            layers=state['patches'], cue_types=state['cue_type_patches']))
+        save_choices(state['show_id'], SavedChoices(
+            layers=state['patches'], cue_types=state['cue_type_patches'],
+            cue_type_prefixes=state['cue_type_prefixes']))
 
 
 async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None) -> None:
@@ -450,23 +462,37 @@ async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None
 
 def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
                     live: list[dict] | None) -> None:
-    """Dialog: choose the QLab type, colour, OSC command and, for Network, the patch for each
-    unknown cue type, then sync. Each type's patch is remembered for the show."""
+    """Dialog: for each unknown cue type, choose its QLab type, the prefix its QLab numbers
+    get (required), colour, OSC command and, for Network, patch; then sync. The patch and
+    prefix are remembered for the show."""
     chosen = {}
     for cue_type in unknown:
         saved = state['cue_type_patches'].get(cue_type)
-        chosen[cue_type] = TypeMapping(type='Network', patch=saved.uniqueID if saved else None)
+        chosen[cue_type] = TypeMapping(
+            type='Network', patch=saved.uniqueID if saved else None,
+            prefix=state['cue_type_prefixes'].get(cue_type))
     pickers: dict[str, Any] = {}
+    sync_button = None
 
     def pick(cue_type: str, m: TypeMapping, uid: str) -> None:
         m.patch = uid or None
         if _choose(state['cue_type_patches'], cue_type, uid, live):
-            _save_patches(state)
+            _save_choices(state)
 
     def set_type(cue_type: str, m: TypeMapping, value: str) -> None:
         m.type = value
         pickers[cue_type].set_visibility(value == 'Network')
         m.patch = (pickers[cue_type].value or None) if value == 'Network' else None
+
+    def set_prefix(cue_type: str, m: TypeMapping, value: str) -> None:
+        value = (value or '').strip()
+        m.prefix = value or None
+        if value and state['cue_type_prefixes'].get(cue_type) != value:
+            state['cue_type_prefixes'][cue_type] = value
+            _save_choices(state)
+        # Sync stays disabled until every type has a prefix
+        if sync_button is not None:
+            sync_button.enable() if all(c.prefix for c in chosen.values()) else sync_button.disable()
 
     with ui.dialog() as dialog, ui.card().classes('min-w-96'):
         ui.label('Unknown cue types').classes('text-h6')
@@ -480,6 +506,11 @@ def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
                 ui.select(list(QLAB_TYPE_NAMES), label='QLab type', value=m.type,
                           on_change=lambda e, t=cue_type, m=m: set_type(t, m, e.value)
                           ).classes('w-40')
+                ui.input('Number prefix', placeholder='e.g. tm', value=m.prefix or '',
+                         validation={'Required': lambda v: bool((v or '').strip())},
+                         on_change=lambda e, t=cue_type, m=m: set_prefix(t, m, e.value)
+                         ).classes('w-32')
+            with ui.row().classes('w-full items-center'):
                 ui.input('Colour', placeholder='e.g. orange', on_change=lambda e, m=m: setattr(
                     m, 'color', e.value or None)).classes('grow')
             ui.input('OSC command', placeholder='e.g. /eos/cue/{number}/fire',
@@ -489,7 +520,7 @@ def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
                 value=m.patch or '', on_change=lambda e, t=cue_type, m=m: pick(t, m, e.value),
             ).classes('w-full')
             pickers[cue_type].set_visibility(m.type == 'Network')
-        ui.label('{number} (QLab number), {name} and {layer} are filled in per cue.'
+        ui.label('{number} (QLab number, with the prefix), {name} and {layer} are filled in per cue.'
                  ).classes('text-caption text-grey')
 
         async def sync_with_types():
@@ -498,7 +529,9 @@ def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
 
         with ui.row().classes('w-full justify-end'):
             ui.button('Cancel', on_click=dialog.close).props('flat')
-            ui.button('Sync', on_click=sync_with_types).props('color=primary')
+            sync_button = ui.button('Sync', on_click=sync_with_types).props('color=primary')
+    if not all(c.prefix for c in chosen.values()):
+        sync_button.disable()
     dialog.open()
 
 
