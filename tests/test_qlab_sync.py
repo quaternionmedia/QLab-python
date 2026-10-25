@@ -93,7 +93,7 @@ def test_type_mapping_sets_colour_and_osc_after_layer_colour():
     c = make_cues()
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
-    m = TypeMapping(type='Network', prefix='v', color='red', osc='/tm/{number}/{name}')
+    m = TypeMapping(type='Network', prefix='v', color='red', osc='/tm/{prefix}{number}/{name}')
     c.sync_show_cues([cue], {'Projector': 'video'}, {'TheatreMix': m})
     assert ('/cue_id/uuid-1/customString', '/tm/v42/Cue') in c.q.sent
     assert [v for k, v in c.q.sent if k.endswith('/colorName')][-1] == 'red'
@@ -101,7 +101,8 @@ def test_type_mapping_sets_colour_and_osc_after_layer_colour():
 
 def test_render_osc_fills_known_placeholders_only():
     cue = QLabCue(type='Network', number='s42', name='Fog', layer='sound')
-    assert render_osc('/x/{number}/{layer}/{bogus}', cue) == '/x/s42/sound/{bogus}'
+    assert render_osc('/x/{number}/{layer}/{bogus}', cue, '42', 's') == '/x/42/sound/{bogus}'
+    assert render_osc('/{prefix}{number}/{name}', cue, '42', 's') == '/s42/Fog'
 
 
 def test_sync_follows_script_order(tmp_path, monkeypatch):

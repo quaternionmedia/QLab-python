@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
+import showrunner
 from showrunner.connection import (
     Connection,
     ConnectionManager,
@@ -35,6 +36,7 @@ from showrunner.models import Cue as ShowCue
 from showrunner.models import CueList
 from showrunner.plugins.db import get_db
 
+from qlab import group_sync
 from qlab.cues import (
     CUE_TYPES,
     QLAB_TYPE_NAMES,
@@ -43,6 +45,7 @@ from qlab.cues import (
     MissingPrefix,
     TypeMapping,
     patch_numbers,
+    show_qlab_number,
     unknown_cue_types,
 )
 from qlab.qlab import QLab
@@ -144,7 +147,8 @@ def sync_cue_list(
 
     ``layers=None`` syncs every layer. ``types`` maps each non-QLab cue type to how it is sent.
     ``patches`` maps a layer to the QLab network patch ``uniqueID`` its cues use; None or
-    missing means no patch is set.
+    missing means no patch is set. Returns ``synced``, ``cues`` and ``uids`` (QLab number ->
+    uniqueID of each cue written).
     Raises ``ValueError`` if the cue list is missing, ``UnknownCueTypes`` if a cue type
     is neither a QLab type nor in ``types``, ``MissingPrefix`` if a type in ``types`` has no
     prefix, ``MissingPatch`` if a chosen patch is not in QLab.
@@ -164,12 +168,56 @@ def sync_cue_list(
         layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
     if layers is not None:
         show_cues = [c for c in show_cues if c.layer in layers]
+    return _sync_cues(cues, layer_types, show_cues, types or {}, patches)
+
+
+def sync_with_groups(
+    cues: Cues,
+    cue_list_id: int,
+    layers: list[str] | None = None,
+    types: dict[str, TypeMapping] | None = None,
+    patches: dict[str, str | None] | None = None,
+    sync_orphans: bool = False,
+) -> dict:
+    """sync_cue_list plus the group steps: queued deletes go to QLab, then QLab groups are
+    pulled (QLab wins), then the cues are sent, then new or changed ShowRunner groups are pushed.
+
+    ``sync_orphans`` creates ShowRunner cues for QLab-only group children; otherwise they are
+    skipped and counted. The result adds ``groups``: ``{'pulled': ..., 'pushed': ...}``.
+    """
+    db = get_db()
+    with db.session() as s:
+        cue_list = s.get(CueList, cue_list_id)
+        if not cue_list:
+            raise ValueError(f'CueList {cue_list_id} not found')
+        all_cues = s.exec(select(ShowCue).where(ShowCue.cue_list_id == cue_list_id)).all()
+        layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
+        skip_uids = group_sync.unpushed_uids(s, cue_list_id)
     types = types or {}
+    # Queued deletes go to QLab first, so the pull below does not bring those groups back
+    deleted = group_sync.apply_pending_deletes(cues)
+    group_numbers = {show_qlab_number(c, layer_types, types): c.id for c in all_cues}
+    pulled = group_sync.pull(cues, cue_list_id, group_numbers, sync_orphans, skip_uids)
+    result = sync_cue_list(cues, cue_list_id, layers, types, patches)
+    pushed = group_sync.push(cues, cue_list_id, group_numbers, result.pop('uids'))
+    pushed.deleted = deleted
+    result['groups'] = {'pulled': pulled.as_dict(), 'pushed': pushed.as_dict()}
+    return result
+
+
+def _sync_cues(
+    cues: Cues,
+    layer_types: dict[str, str],
+    show_cues: list,
+    types: dict[str, TypeMapping],
+    patches: dict[str, str | None] | None,
+) -> dict:
+    """The cue half of sync_cue_list: send *show_cues* (already filtered by layer) to QLab."""
     missing = {t: n for t, n in unknown_cue_types(show_cues).items() if t not in types}
     if missing:
         raise UnknownCueTypes(missing)
     if not show_cues:
-        return {'synced': 0, 'cues': []}
+        return {'synced': 0, 'cues': [], 'uids': {}}
     unprefixed = sorted({c.cue_type for c in show_cues
                          if c.cue_type in types and not types[c.cue_type].prefix})
     if unprefixed:
@@ -184,7 +232,11 @@ def sync_cue_list(
         numbers = patch_numbers(live, layer_pick)
         type_numbers = patch_numbers(live, type_pick)
     synced = cues.sync_show_cues(show_cues, layer_types, types, numbers, type_numbers)
-    return {'synced': len(synced), 'cues': [q.model_dump() for q in synced]}
+    return {
+        'synced': len(synced),
+        'cues': [q.model_dump() for q in synced],
+        'uids': {q.number: str(q.id) for q in synced if q.number},
+    }
 
 
 def _in_daemon_thread(fn, *args) -> asyncio.Future:
@@ -223,17 +275,19 @@ def _sync_locked(
     layers: list[str] | None,
     types: dict | None,
     patches: dict[str, str | None] | None = None,
+    sync_orphans: bool = False,
 ) -> dict:
     """Run sync_cue_list in a worker thread. Reads QLab's cues inside the lock, so a second
     sync sees what the first one created."""
     with _sync_lock:
-        return sync_cue_list(_get_cues(), cue_list_id, layers, types, patches)
+        return sync_with_groups(_get_cues(), cue_list_id, layers, types, patches, sync_orphans)
 
 
 class SyncRequest(BaseModel):
     layers: list[str] | None = None  # None: every layer
     types: dict[str, TypeMapping] = Field(default_factory=dict)  # non-QLab type -> how to send
     patches: dict[str, str | None] = Field(default_factory=dict)  # layer -> QLab patch uniqueID
+    sync_orphans: bool = False  # create cues for QLab-only group children (else skip them)
 
 
 @router.post("/sync/{cue_list_id}")
@@ -247,7 +301,7 @@ async def sync_cuelist(cue_list_id: int, body: SyncRequest | None = None):
     body = body or SyncRequest()
     try:
         return await _in_daemon_thread(
-            _sync_locked, cue_list_id, body.layers, body.types, body.patches)
+            _sync_locked, cue_list_id, body.layers, body.types, body.patches, body.sync_orphans)
     except ValueError as e:
         raise HTTPException(404, str(e))
     except UnknownCueTypes as e:
@@ -341,7 +395,8 @@ class QLabPage(ConnectionPage):
         state = {'cue_list': next(iter(cue_lists), None), 'layers': set(layer_names),
                  'show_id': show_id, 'patches': saved.layers,
                  'cue_type_patches': saved.cue_types,
-                 'cue_type_prefixes': saved.cue_type_prefixes, 'live': None}
+                 'cue_type_prefixes': saved.cue_type_prefixes, 'live': None,
+                 'sync_orphans': False}
         pickers: dict[str, Any] = {}
 
         def choose_patch(layer: str, uid: str) -> None:
@@ -380,6 +435,10 @@ class QLabPage(ConnectionPage):
                           on_change=lambda e: state.update(cue_list=e.value)).classes('w-64')
                 ui.button('Sync', icon='sync', on_click=lambda: _run_sync(ui, state)
                           ).props('color=primary')
+                ui.checkbox('Create cues for QLab-only group children',
+                            value=False,
+                            on_change=lambda e: state.update(sync_orphans=e.value)
+                            ).tooltip('Off: such children are skipped and counted')
             with ui.row().classes('w-full items-center gap-2'):
                 ui.label('Layers:')
                 for name in layer_names:
@@ -445,7 +504,8 @@ async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None
     try:
         # QLab I/O blocks: keep it off the event loop so the server keeps serving
         result = await _in_daemon_thread(
-            _sync_locked, state['cue_list'], sorted(state['layers']), types, patches)
+            _sync_locked, state['cue_list'], sorted(state['layers']), types, patches,
+            state['sync_orphans'])
     except UnknownCueTypes as e:
         try:
             live = await _live_patches()
@@ -457,7 +517,19 @@ async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None
     except Exception as e:  # HTTPException (not connected) or a QLab error
         ui.notify(str(getattr(e, 'detail', e)), type='negative', multi_line=True)
         return
-    ui.notify(f"Synced {result['synced']} cue(s)", type='positive')
+    ui.notify(f"Synced {result['synced']} cue(s). {_group_summary(result['groups'])}",
+              type='positive', multi_line=True)
+
+
+def _group_summary(groups: dict) -> str:
+    pulled, pushed = groups['pulled'], groups['pushed']
+    text = (f"Groups: {pulled['pulled']} pulled, {pushed['pushed']} pushed, "
+            f"{pulled['removed_groups']} removed, {pushed['deleted']} deleted in QLab.")
+    if pulled['orphans_skipped']:
+        text += f" {pulled['orphans_skipped']} QLab-only child(ren) skipped."
+    if pulled['conflicts']:
+        text += f" Conflicts (ShowRunner kept): {', '.join(pulled['conflicts'])}."
+    return text
 
 
 def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
@@ -520,7 +592,8 @@ def _ask_qlab_types(ui, state: dict, unknown: dict[str, int],
                 value=m.patch or '', on_change=lambda e, t=cue_type, m=m: pick(t, m, e.value),
             ).classes('w-full')
             pickers[cue_type].set_visibility(m.type == 'Network')
-        ui.label('{number} (QLab number, with the prefix), {name} and {layer} are filled in per cue.'
+        ui.label('{number} (the cue number), {prefix} (the QLab number prefix), {name} and {layer} '
+                 'are filled in per cue.'
                  ).classes('text-caption text-grey')
 
         async def sync_with_types():
@@ -548,6 +621,11 @@ class QLabPlugin(ConnectionPlugin):
     manager = _qlab
     router = router
     page_cls = QLabPage
+
+    @showrunner.hookimpl
+    def showrunner_group_changed(self, action, group, before):
+        group_sync.record_change(action, group)  # queued; the next Sync does the QLab I/O
+        return None
 
 
 plugin = QLabPlugin()

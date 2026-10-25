@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 from typing import Literal, get_args
@@ -64,9 +63,10 @@ def patch_numbers(patches: list[dict], chosen: dict[str, str | None]) -> dict[st
     return {layer: numbers[pid] for layer, pid in chosen.items()}
 
 
-def render_osc(template: str, cue: QLabCue) -> str:
-    """Fill {number}, {name} and {layer} from the cue; other {words} stay as typed."""
-    values = {'number': cue.number, 'name': cue.name or '', 'layer': cue.layer or ''}
+def render_osc(template: str, cue: QLabCue, number: str, prefix: str) -> str:
+    """Fill {number} (the ShowRunner cue number), {prefix} (the QLab number prefix), {name} and
+    {layer} from the cue; other {words} stay as typed."""
+    values = {'number': number, 'prefix': prefix, 'name': cue.name or '', 'layer': cue.layer or ''}
     return re.sub(r'\{(\w+)\}', lambda m: values.get(m.group(1), m.group(0)), template)
 
 
@@ -86,7 +86,7 @@ CUE_TYPES = {
 class QLabCue(BaseModel):
     """QLab cue"""
 
-    id: UUID | None = Field(None, alias='uniqueID')
+    id: str | None = Field(None, alias='uniqueID')  # str: keep QLab's casing, UUID lowercases it
     type: QLAB_TYPES
     layer: str | None = None
 
@@ -102,13 +102,65 @@ class QLabCue(BaseModel):
 
 class QLabCueList(QLabCue):
     number: str | None = None
-    id: UUID | None = Field(None, alias='uniqueID')
+    id: str | None = Field(None, alias='uniqueID')
     cues: list[QLabCue] | None = None
     colorName: str | None = None
     flagged: bool | None = None
     name: str | None = None
     listName: str | None = None
     type: str = 'Cue List'
+
+
+def qlab_number(number, point, prefix: str = '') -> str:
+    """QLab cue number for a ShowRunner cue: layer/type *prefix*, number, then ``.point``."""
+    cue_number = str(number)
+    if point:
+        cue_number += f'.{point}'
+    return f'{prefix}{cue_number}'
+
+
+def qlab_prefix(cue, layer_types: dict[str, str], type_overrides=None) -> str:
+    """The QLab number prefix ``sync_show_cues`` gives *cue*: its type mapping's, else its layer's."""
+    layer = layer_types.get(cue.layer, 'generic')
+    mapping = (type_overrides or {}).get(cue.cue_type)
+    return (mapping.prefix or '') if mapping else LAYER_IDS.get(layer, '')
+
+
+def show_qlab_number(cue, layer_types: dict[str, str], type_overrides=None) -> str:
+    """The QLab number ``sync_show_cues`` gives *cue*: the same rule, shared with group pull."""
+    return qlab_number(cue.number, cue.point, qlab_prefix(cue, layer_types, type_overrides))
+
+
+def group_tree(cuelists: list) -> list[dict]:
+    """QLab Group cues as dicts, outer groups first.
+
+    Each: ``uid``, ``name``, ``color`` (colorName), ``parent`` (uid of the enclosing group, else
+    None), ``list`` (uid of the cue list it sits in), ``index`` (its position among its siblings),
+    ``children`` (uids of every direct child, in order), ``members`` (the non-group children as
+    QLabCue, in order). Cue Lists are not groups and are skipped.
+    """
+    groups: list[dict] = []
+    by_uid: dict[str, dict] = {}
+
+    def walk(items, parent: str | None, list_uid: str | None) -> None:
+        for index, cue in enumerate(items or []):
+            if parent:
+                by_uid[parent]['children'].append(str(cue.id))
+            if cue.type == 'Group':
+                node = {
+                    'uid': str(cue.id), 'name': cue.name or '', 'color': cue.colorName,
+                    'parent': parent, 'list': list_uid, 'index': index,
+                    'children': [], 'members': [],
+                }
+                groups.append(node)
+                by_uid[node['uid']] = node
+                walk(cue.cues, node['uid'], list_uid)
+            elif parent:
+                by_uid[parent]['members'].append(cue)
+
+    for cl in cuelists:
+        walk(cl.cues, None, str(cl.id))
+    return groups
 
 
 def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
@@ -123,6 +175,16 @@ def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
             continue
         results[cue.number] = cue
     return results
+
+
+class QLabError(Exception):
+    """QLab answered a command with a status other than ok."""
+
+
+def _ok(reply: dict) -> dict:
+    if reply.get('status') != 'ok':
+        raise QLabError(f"{reply.get('address')}: {reply.get('status')}")
+    return reply
 
 
 class Cues:
@@ -178,11 +240,7 @@ class Cues:
                 else mapping.type if mapping else CUE_TYPES.get(layer, 'Network')
             )
             # A mapped cue is numbered with its mapping's prefix, not its layer's
-            prefix = (mapping.prefix or '') if mapping else LAYER_IDS.get(layer, '')
-            cue_number = str(cue.number)
-            if cue.point:
-                cue_number += f'.{cue.point}'
-            qlab_number = f'{prefix}{cue_number}'
+            qlab_number = show_qlab_number(cue, layer_types, type_overrides)
 
             # Only Network cues take a patch
             if mapping:
@@ -199,7 +257,10 @@ class Cues:
             )
             if mapping:
                 q.colorName = mapping.color
-                q.customString = render_osc(mapping.osc, q) if mapping.osc else None
+                q.customString = (
+                    render_osc(mapping.osc, q, cue.number, qlab_prefix(cue, layer_types, type_overrides))
+                    if mapping.osc else None
+                )
 
             if qlab_number in self.cues:
                 previous = self.update_cue(q).id
@@ -241,7 +302,38 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', cue.patch)
         return cue
 
-    def create_cue(self, cue: QLabCue, previous: UUID = None):
+    def _workspace(self) -> str:
+        # Unprefixed cue commands only reach one workspace, so refuse to guess between several
+        open_ = _ok(self.q.send('/workspaces'))['data']
+        if len(open_) != 1:
+            raise QLabError(f'expected one open workspace, found {len(open_)}')
+        return open_[0]['uniqueID']
+
+    def new_group(self, name: str, colour: str | None) -> str:
+        """Create an empty Group cue at the end of the list; returns its uniqueID."""
+        uid = _ok(self.q.send('/new', 'group'))['data']
+        self.set_group(uid, name, colour)
+        return uid
+
+    def set_group(self, uid: str, name: str, colour: str | None) -> None:
+        _ok(self.q.send(f'/cue_id/{uid}/name', value=name or 'Group'))
+        if colour:
+            _ok(self.q.send(f'/cue_id/{uid}/colorName', colour))
+
+    def move_cue(self, cue_uid: str, index: int, parent_uid: str) -> None:
+        """Move a cue to *index* among the children of *parent_uid* (a Group or the cue list).
+
+        Verified on QLab 5.6.3: [index, parent] works; an index alone is an error, so a cue
+        leaving a group names the cue list as its parent. Lists are sent because the OSC
+        builder drops a bare 0.
+        """
+        _ok(self.q.send(f'/workspace/{self._workspace()}/move/{cue_uid}', [index, parent_uid]))
+
+    def delete_cue(self, cue_uid: str) -> None:
+        """Delete a cue by uniqueID. Verified on 5.6.3 (delete_id); a Group's children go too."""
+        _ok(self.q.send(f'/workspace/{self._workspace()}/delete_id/{cue_uid}'))
+
+    def create_cue(self, cue: QLabCue, previous: str = None):
         """Create a cue"""
         cue_type = cue.type.lower()
         # TODO We should be able to send /new type [previous]
