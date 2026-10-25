@@ -19,6 +19,7 @@ from qlab import group_sync
 from qlab import showrunner as qlab_showrunner
 from qlab.cues import (
     Cues,
+    LayerInfo,
     QLabCue,
     QLabCueList,
     TypeMapping,
@@ -73,6 +74,9 @@ class FakeQLab:
         self.sent.append((message, value))
         if message.startswith('/workspace/ws/move/') and len(value or []) < 2:
             # QLab 5.6.3 rejects an index without a parent (spike)
+            return {'address': message, 'status': 'error', 'data': None}
+        if message.endswith('/number') and value is None:
+            # QLab rejects a number write with no value (the OSC builder sends '' as no value)
             return {'address': message, 'status': 'error', 'data': None}
         return {'address': message, 'status': 'ok', 'data': self._apply(message, value)}
 
@@ -150,7 +154,7 @@ def test_show_qlab_number_uses_layer_prefix_or_type_mapping():
     lights = SimpleNamespace(layer='Lights', cue_type=None, number=42, point=0)
     sound = SimpleNamespace(layer='Sound', cue_type=None, number=7, point=2)
     mapped = SimpleNamespace(layer='Projector', cue_type='TheatreMix', number=3, point=0)
-    layer_types = {'Lights': 'lights', 'Sound': 'sound', 'Projector': 'video'}
+    layer_types = {'Lights': LayerInfo('lights', ''), 'Sound': LayerInfo('sound', 's'), 'Projector': LayerInfo('video', 'v')}
     overrides = {'TheatreMix': TypeMapping(type='Network', prefix='m')}
     assert show_qlab_number(lights, layer_types) == '42'
     assert show_qlab_number(sound, layer_types) == 's7.2'
@@ -173,8 +177,14 @@ def test_new_group_sets_name_and_colour():
     assert ('/cue_id/%s/colorName' % uid, 'orange') in fake.sent
 
 
+def test_group_number_uses_the_layer_prefix_from_config():
+    layer_types = {'Sound': LayerInfo('sound', 'FX'), 'Lights': LayerInfo('lights', '')}
+    assert group_qlab_number('7', 'Sound', layer_types) == 'FX7'
+    assert group_qlab_number('7', 'Gone', layer_types) == 'Gone7'  # unknown layer: its letters
+
+
 def test_group_number_takes_layer_prefix_like_a_cue():
-    layer_types = {'Lights': 'lights', 'Sound': 'sound'}
+    layer_types = {'Lights': LayerInfo('lights', ''), 'Sound': LayerInfo('sound', 's')}
     assert group_qlab_number('5', 'Sound', layer_types) == 's5'
     assert group_qlab_number('5', 'Lights', layer_types) == '5'
     assert group_qlab_number(None, 'Sound', layer_types) == ''
@@ -194,7 +204,7 @@ def show_db(tmp_path, monkeypatch):
     with db.session() as s:
         s.add(Show(name='Hamlet'))
         s.commit()
-        add_layer(s, 1, 'Lights', 'lights', 'orange')
+        add_layer(s, 1, 'Lights', 'lights', 'orange', prefix='')  # the show's default layer
         s.add(CueList(show_id=1, name='Main'))
         s.commit()
         s.add(Cue(cue_list_id=1, number='1', layer='Lights', script_line=1))
@@ -248,16 +258,57 @@ def test_pull_empties_existing_group_whose_cues_left_it_in_qlab(show_db):
         assert s.exec(select(Cue).where(Cue.group_id.is_not(None))).all() == []
 
 
-def test_pull_removes_group_deleted_in_qlab_and_keeps_its_cues(show_db):
+def test_group_gone_from_qlab_is_created_again_and_keeps_its_cues(show_db):
     with show_db.session() as s:
         create_group(s, 1, [1, 2], name='Gone').external_id = U(50)
         s.commit()
-    cues, _ = make_cues(cue_list_tree())
+    cues, fake = make_cues(cue_list_tree())
     report = group_sync.pull(cues, 1, NUMBERS)
-    assert report.removed_groups == 1
+    assert report.recreated == 1 and report.removed_groups == 0
     with show_db.session() as s:
-        assert s.exec(select(CueGroup)).all() == []
+        assert s.exec(select(CueGroup)).one().external_id is None
         assert len(s.exec(select(Cue).where(Cue.cue_list_id == 1)).all()) == 2
+    # push then creates it in QLab (ShowRunner wins)
+    pushed = group_sync.push(cues, 1, NUMBERS, {})
+    assert pushed.created_groups == 1
+    assert ('/new', 'group') in fake.sent or any(m == '/new' for m, _ in fake.sent)
+
+
+def test_workspace_change_relinks_group_to_the_same_cues(show_db):
+    from showrunner.groups import group_tree
+    from showrunner.layers import get_layers
+    from qlab.cues import layer_infos
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Act').external_id = U(50)  # uniqueID from the old workspace
+        s.commit()
+    tree = cue_list_tree(qcue(2, type_='Group', name='Act', children=[
+        qcue(3, number='1'), qcue(4, number='2')]))
+    cues, _ = make_cues(tree)
+    with show_db.session() as s:
+        layer_types = layer_infos(get_layers(s, 1))
+    group_sync.unlink(show_db.session().__enter__(), 1) if False else None
+    with show_db.session() as s:
+        group_sync.unlink(s, 1)
+    report = group_sync.relink(cues, 1, layer_types, {})
+    assert report.relinked == 1
+    with show_db.session() as s:
+        assert s.exec(select(CueGroup)).one().external_id == U(2)
+        assert group_tree(s, 1)[0]['external_id'] == U(2)
+    assert group_sync.dirty == {1}
+
+
+def test_relink_leaves_a_group_unlinked_when_no_qlab_group_matches(show_db):
+    from showrunner.layers import get_layers
+    from qlab.cues import layer_infos
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Act')
+        s.commit()
+    cues, _ = make_cues(cue_list_tree(qcue(3, number='1')))
+    with show_db.session() as s:
+        layer_types = layer_infos(get_layers(s, 1))
+    assert group_sync.relink(cues, 1, layer_types, {}).relinked == 0
+    with show_db.session() as s:
+        assert s.exec(select(CueGroup)).one().external_id is None
 
 
 def test_pull_leaves_dirty_group_alone_and_reports_conflict(show_db):
@@ -290,8 +341,21 @@ def test_push_creates_group_in_qlab_then_moves_members(show_db):
         assert s.get(CueGroup, 1).external_id == U(101)  # the id FakeQLab gives /new
     # both members moved into the new group, in order
     moves = [m for m, _ in fake.sent if m.startswith('/workspace/ws/move/')]
-    assert len(moves) == 2
+    assert len(moves) == 3  # the group's own placement, then its two members
     assert group_sync.dirty == set()
+
+
+def test_new_group_is_placed_at_its_first_member_not_the_end(show_db):
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Scene')
+        s.commit()
+    group_sync.dirty.add(1)
+    tree = cue_list_tree(qcue(3, number='1'), qcue(9, number='0'), qcue(4, number='2'))
+    cues, fake = make_cues(tree)
+    group_sync.push(cues, 1, NUMBERS, {'1': U(3), '2': U(4)})
+    # the first move places the new (empty) group before its first member, at index 0
+    moves = [(m, v) for m, v in fake.sent if m.startswith('/workspace/ws/move/')]
+    assert moves[0] == ('/workspace/ws/move/' + U(101), [0, U(1)])
 
 
 def test_delete_ungroups_children_before_deleting_the_group(show_db):
@@ -477,3 +541,46 @@ def test_qlab_renumber_onto_a_taken_number_keeps_showrunner_and_reports(show_db)
     assert _cue(show_db, 1)[:2] == ('1', 0)  # cue 2 already has number 2 in ShowRunner
     assert any('taken' in c for c in result['groups']['pulled']['conflicts'])
     assert [n['number'] for n in fake.tree[0]['cues'] if n['uniqueID'] == U(50)] == ['1']
+
+
+def test_unnumbered_group_is_created_without_a_number_write(show_db):
+    cues, fake = make_cues(cue_list_tree())
+    uid = cues.new_group('Act', 'orange', '')
+    assert not [m for m, _ in fake.sent if m.endswith('/number')]
+    assert ('/cue_id/%s/name' % uid, 'Act') in fake.sent
+
+
+def _record_workspace(show_db, workspace):
+    from showrunner.models import Config
+    with show_db.session() as s:
+        s.add(Config(show_id=1, key='qlab.workspace.1', value=workspace))
+        s.commit()
+
+
+def test_sync_in_the_same_workspace_recreates_a_missing_group(show_db):
+    _record_workspace(show_db, 'ws')  # the workspace the fake QLab reports
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Act').external_id = U(50)
+        s.commit()
+    cues, _ = make_cues(cue_list_tree(qcue(3, number='1'), qcue(4, number='2')))
+    result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert result['groups']['pulled']['recreated'] == 1
+    assert result['groups']['pushed']['created_groups'] == 1
+
+
+def test_sync_in_another_workspace_relinks_instead_of_duplicating(show_db):
+    _record_workspace(show_db, 'old-ws')
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Act').external_id = U(50)
+        s.commit()
+    tree = cue_list_tree(qcue(2, type_='Group', name='Act',
+                              children=[qcue(3, number='1'), qcue(4, number='2')]))
+    cues, _ = make_cues(tree)
+    result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert result['groups']['pulled']['relinked'] == 1
+    assert result['groups']['pushed']['created_groups'] == 0
+    with show_db.session() as s:
+        assert s.exec(select(CueGroup)).one().external_id == U(2)
+    with show_db.session() as s:
+        from showrunner.models import Config
+        assert s.exec(select(Config).where(Config.key == 'qlab.workspace.1')).one().value == 'ws'

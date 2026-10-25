@@ -41,10 +41,12 @@ from qlab.cues import (
     CUE_TYPES,
     QLAB_TYPE_NAMES,
     Cues,
+    LayerInfo,
     MissingPatch,
     MissingPrefix,
     TypeMapping,
     patch_numbers,
+    layer_infos,
     show_qlab_number,
     unknown_cue_types,
 )
@@ -165,7 +167,7 @@ def sync_cue_list(
             .order_by(ShowCue.script_line.is_(None), ShowCue.script_line, ShowCue.script_char,
                       ShowCue.sequence, ShowCue.number, ShowCue.point)
         ).all()
-        layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
+        layer_types = layer_infos(get_layers(s, cue_list.show_id))
     if layers is not None:
         show_cues = [c for c in show_cues if c.layer in layers]
     result = _sync_cues(cues, layer_types, show_cues, types or {}, patches)
@@ -185,6 +187,24 @@ def _record_links(links: dict[int, tuple[str, str]]) -> None:
         s.commit()
 
 
+WORKSPACE_KEY = 'qlab.workspace'  # DB Config key per cue list: the QLab workspace its links came from
+
+
+def _linked_workspace(s, show_id: int, cue_list_id: int) -> str | None:
+    row = s.exec(select(Config).where(
+        Config.show_id == show_id, Config.key == f'{WORKSPACE_KEY}.{cue_list_id}')).first()
+    return row.value if row else None
+
+
+def _link_workspace(s, show_id: int, cue_list_id: int, workspace: str) -> None:
+    key = f'{WORKSPACE_KEY}.{cue_list_id}'
+    row = s.exec(select(Config).where(Config.show_id == show_id, Config.key == key)).first()
+    if row is None:
+        row = Config(show_id=show_id, key=key)
+    row.value = workspace
+    s.add(row)
+
+
 def sync_with_groups(
     cues: Cues,
     cue_list_id: int,
@@ -193,41 +213,62 @@ def sync_with_groups(
     patches: dict[str, str | None] | None = None,
     sync_orphans: bool = False,
 ) -> dict:
-    """sync_cue_list plus the group steps: queued deletes go to QLab, then QLab groups are
-    pulled (QLab wins), then the cues are sent, then new or changed ShowRunner groups are pushed.
+    """sync_cue_list plus the group steps. ShowRunner wins: queued deletes go to QLab, then
+    QLab groups are pulled, the cues are sent, and new or changed ShowRunner groups are pushed.
 
-    ``sync_orphans`` creates ShowRunner cues for QLab-only group children; otherwise they are
-    skipped and counted. The result adds ``groups``: ``{'pulled': ..., 'pushed': ...}``.
+    The QLab workspace is remembered per cue list. In a different one the old uniqueIDs
+    mean nothing: they are dropped, cues are matched by number, and groups are relinked to the
+    QLab group holding the same cues (or created). Otherwise a group gone from QLab is created
+    again. ``sync_orphans`` creates ShowRunner cues for QLab-only group children; otherwise they
+    are skipped and counted. The result adds ``groups``: ``{'pulled': ..., 'pushed': ...}``.
     """
     db = get_db()
+    workspace = cues.workspace_id()
     with db.session() as s:
         cue_list = s.get(CueList, cue_list_id)
         if not cue_list:
             raise ValueError(f'CueList {cue_list_id} not found')
-        layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
+        show_id = cue_list.show_id
+        layer_types = layer_infos(get_layers(s, show_id))
         skip_uids = group_sync.unpushed_uids(s, cue_list_id)
+        linked = _linked_workspace(s, show_id, cue_list_id)
+        moved = linked is not None and linked != workspace  # no record: links are taken as current
+        if moved:
+            group_sync.unlink(s, cue_list_id)
     types = types or {}
-    # Queued deletes go to QLab first, so the pull below does not bring those groups back
-    deleted = group_sync.apply_pending_deletes(cues)
-    # Cue numbers renumbered in QLab come in first, so the numbers below are current
-    numbered = group_sync.pull_numbers(cues, cue_list_id, types)
+    if moved:
+        deleted, numbered = 0, group_sync.Report()  # queued deletes name the old workspace
+        group_sync.clear_pending_deletes()
+    else:
+        # Queued deletes go to QLab first, so the pull below does not bring those groups back
+        deleted = group_sync.apply_pending_deletes(cues)
+        # Cue numbers renumbered in QLab come in first, so the numbers below are current
+        numbered = group_sync.pull_numbers(cues, cue_list_id, types)
     with db.session() as s:
         all_cues = s.exec(select(ShowCue).where(ShowCue.cue_list_id == cue_list_id)).all()
         group_numbers = {show_qlab_number(c, layer_types, types): c.id
                      for c in all_cues if c.number is not None}
-    pulled = group_sync.pull(cues, cue_list_id, group_numbers, sync_orphans, skip_uids)
-    pulled.renumbered = numbered.renumbered
-    pulled.conflicts = numbered.conflicts + pulled.conflicts
+    if moved:
+        pulled = group_sync.Report()  # groups are relinked after the cues, not pulled
+    else:
+        pulled = group_sync.pull(cues, cue_list_id, group_numbers, sync_orphans, skip_uids)
+        pulled.renumbered = numbered.renumbered
+        pulled.conflicts = numbered.conflicts + pulled.conflicts
     result = sync_cue_list(cues, cue_list_id, layers, types, patches)
+    if moved:
+        pulled.relinked = group_sync.relink(cues, cue_list_id, layer_types, types).relinked
     pushed = group_sync.push(cues, cue_list_id, group_numbers, result.pop('uids'))
     pushed.deleted = deleted
+    with db.session() as s:
+        _link_workspace(s, show_id, cue_list_id, workspace)
+        s.commit()
     result['groups'] = {'pulled': pulled.as_dict(), 'pushed': pushed.as_dict()}
     return result
 
 
 def _sync_cues(
     cues: Cues,
-    layer_types: dict[str, str],
+    layer_types: dict[str, LayerInfo],
     show_cues: list,
     types: dict[str, TypeMapping],
     patches: dict[str, str | None] | None,
@@ -546,7 +587,8 @@ async def _run_sync(ui, state: dict, types: dict[str, TypeMapping] | None = None
 def _group_summary(groups: dict) -> str:
     pulled, pushed = groups['pulled'], groups['pushed']
     text = (f"Groups: {pulled['pulled']} pulled, {pushed['pushed']} pushed, "
-            f"{pulled['removed_groups']} removed, {pushed['deleted']} deleted in QLab.")
+            f"{pulled['relinked']} relinked, {pulled['recreated']} recreated, "
+            f"{pushed['deleted']} deleted in QLab.")
     if pulled['orphans_skipped']:
         text += f" {pulled['orphans_skipped']} QLab-only child(ren) skipped."
     if pulled['conflicts']:

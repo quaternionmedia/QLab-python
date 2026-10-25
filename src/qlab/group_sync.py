@@ -1,11 +1,13 @@
 """Two-way sync of cue groups between ShowRunner and QLab Group cues.
 
 A ShowRunner group carries its QLab Group cue's uniqueID in ``external_id``.
-- Pull (QLab wins): QLab groups become ShowRunner groups. QLab-only children are skipped and
-  counted, or created as cues when ``sync_orphans`` is set. Groups with unpushed ShowRunner
-  changes are skipped and reported as conflicts.
+- Pull: QLab groups become ShowRunner groups. QLab-only children are skipped and counted, or
+  created as cues when ``sync_orphans`` is set. Groups with unpushed ShowRunner changes are
+  skipped and reported as conflicts. A group gone from QLab is unlinked, so push recreates it.
 - Push (ShowRunner wins): groups that are new or changed in ShowRunner since the last push
   (``dirty``) are written to QLab.
+- Another QLab workspace: uniqueIDs are dropped and groups are relinked by their cues' numbers
+  (``unlink``, ``relink``), so they are not duplicated.
 - Deletes made in ShowRunner are queued by ``record_change`` (no QLab I/O in the viewer's
   thread) and applied before the next pull: the group's children move out in QLab, then its
   empty Group cue is deleted, so the pull does not bring the group back.
@@ -20,7 +22,6 @@ from dataclasses import asdict, dataclass, field
 
 from showrunner.groups import (
     create_group,
-    delete_group,
     group_depths,
     group_tree,
     set_members,
@@ -35,7 +36,7 @@ from qlab.cues import (
     CUE_TYPES,
     Cues,
     group_qlab_number,
-    layer_prefix,
+    layer_infos,
     qlab_cues_by_uid,
     qlab_prefix,
     show_qlab_number,
@@ -66,6 +67,8 @@ class Report:
     renumbered: int = 0
     created_groups: int = 0
     removed_groups: int = 0
+    recreated: int = 0  # gone from QLab in a matching workspace: created again on push
+    relinked: int = 0  # matched to a QLab group in a different workspace
     orphans_created: int = 0
     orphans_skipped: int = 0
     conflicts: list[str] = field(default_factory=list)
@@ -200,11 +203,11 @@ def pull(
             group_of[uid] = g.id
             report.pulled += 1
 
-        # Groups QLab no longer has were deleted there: delete them here too (cues stay)
+        # Groups QLab no longer has: ShowRunner wins, so push creates them again (cues stay)
         for ext, g in existing.items():
             if ext not in by_uid and ext not in skip_uids:
-                delete_group(s, g.id)
-                report.removed_groups += 1
+                g.external_id = None
+                report.recreated += 1
         s.commit()
     return report
 
@@ -222,8 +225,7 @@ def pull_numbers(cues: Cues, cue_list_id: int, types: dict) -> Report:
     by_uid = qlab_cues_by_uid(cues.cuelists)
     db = get_db()
     with db.session() as s:
-        layer_types = {x['name']: x['type'] for x in get_layers(
-            s, s.get(CueList, cue_list_id).show_id)}
+        layer_types = layer_infos(get_layers(s, s.get(CueList, cue_list_id).show_id))
         linked = s.exec(select(Cue).where(
             Cue.cue_list_id == cue_list_id, Cue.external_id.is_not(None))).all()
         for c in linked:
@@ -259,7 +261,7 @@ def _parse_group_number(qnum: str, layers: list[dict]) -> tuple[str, str] | None
     """(layer, number) for a QLab group number, if exactly one layer's prefix it carries."""
     hits = []
     for x in layers:
-        prefix = layer_prefix(x['name'], x['type'])
+        prefix = x['prefix']
         rest = qnum[len(prefix):] if qnum.startswith(prefix) else ''
         if rest.isdigit():
             hits.append((x['name'], rest))
@@ -307,7 +309,7 @@ def _create_orphan(session, cue_list_id: int, qcue, layers: list[dict], numbers:
     match = _NUMBER.match(qcue.number or '')
     if not match:
         return False
-    layer_types = {x['name']: x['type'] for x in layers}
+    layer_types = layer_infos(layers)
     for x in layers:
         if CUE_TYPES.get(x['type'], 'Network') != qcue.type:  # as sync_show_cues picks it
             continue
@@ -322,6 +324,29 @@ def _create_orphan(session, cue_list_id: int, qcue, layers: list[dict], numbers:
     return False
 
 
+def _positions(cues: Cues) -> dict[str, tuple[str, int, int]]:
+    """Every QLab cue's (container uid, index, document order) across the cue lists."""
+    where: dict[str, tuple[str, int, int]] = {}
+
+    def walk(items, container: str) -> None:
+        for index, cue in enumerate(items or []):
+            where[str(cue.id)] = (container, index, len(where))
+            walk(cue.cues, str(cue.id))
+
+    for cuelist in cues.get_cuelists():
+        walk(cuelist.cues, str(cuelist.id))
+    return where
+
+
+def _place_at_first_member(cues: Cues, uid: str, members: list[str]) -> None:
+    """Move a new, empty group to where its earliest member sits, so it is not left at the end."""
+    where = _positions(cues)
+    found = [m for m in members if m in where]
+    if found:
+        container, index, _ = where[min(found, key=lambda m: where[m][2])]
+        cues.move_cue(uid, index, container)
+
+
 def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, str]) -> Report:
     """Write new and dirty ShowRunner groups to QLab.
 
@@ -334,7 +359,7 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
     db = get_db()
     with db.session() as s:
         show_id = s.get(CueList, cue_list_id).show_id
-        layer_types = {ly['name']: ly['type'] for ly in get_layers(s, show_id)}
+        layer_types = layer_infos(get_layers(s, show_id))
         groups = group_tree(s, cue_list_id)
         depths = group_depths(groups)
         uid_of_group = {g['id']: g['external_id'] for g in groups if g['external_id']}
@@ -343,12 +368,14 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
                 continue
             row = s.get(CueGroup, g['id'])
             qnum = group_qlab_number(g['number'], g['layer'], layer_types)
-            if row.external_id is None:
+            created = row.external_id is None
+            if created:
                 uid = cues.new_group(g['name'], g['color'], qnum)
                 row.external_id = uid
                 s.add(row)
                 uid_of_group[g['id']] = uid
                 report.created_groups += 1
+                _place_at_first_member(cues, uid, [uid_of[c] for c in g['member_ids'] if c in uid_of])
             else:
                 uid = row.external_id
                 cues.set_group(uid, g['name'], g['color'], qnum)
@@ -383,3 +410,51 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
                 dirty.discard(g['id'])
         s.commit()
     return report
+
+
+def unlink(session, cue_list_id: int) -> None:
+    """Forget the QLab uniqueIDs of this list's cues and groups (the workspace changed)."""
+    for g in session.exec(select(CueGroup).where(CueGroup.cue_list_id == cue_list_id)):
+        g.external_id = None
+    for c in session.exec(select(Cue).where(Cue.cue_list_id == cue_list_id)):
+        c.external_id = None
+        c.external_number = None
+    session.commit()
+
+
+def clear_pending_deletes() -> int:
+    """Drop queued group deletes (they name groups of the old workspace); returns the count."""
+    with _lock:
+        n = len(pending_deletes)
+        pending_deletes.clear()
+    return n
+
+
+def relink(cues: Cues, cue_list_id: int, layer_types: dict, types: dict) -> Report:
+    """Link each unlinked ShowRunner group to the QLab group holding exactly the same cues.
+
+    Matched by QLab numbers of the group's own cues. A group with no match, or with more than
+    one, stays unlinked and push creates it. Relinked groups are pushed to refresh their details.
+    """
+    report = Report()
+    tree = qlab_group_tree(cues.get_cuelists())
+    db = get_db()
+    with db.session() as s:
+        cells = {c.id: c for c in s.exec(select(Cue).where(Cue.cue_list_id == cue_list_id))}
+        claimed: set[str] = set()
+        for g in group_tree(s, cue_list_id):
+            if g['external_id'] or not g['cue_ids']:
+                continue
+            want = {show_qlab_number(cells[c], layer_types, types) for c in g['cue_ids']}
+            hits = [n for n in tree if n['uid'] not in claimed
+                    and {m.number for m in n['members']} == want]
+            if len(hits) != 1:
+                continue
+            claimed.add(hits[0]['uid'])
+            s.get(CueGroup, g['id']).external_id = hits[0]['uid']
+            with _lock:
+                dirty.add(g['id'])
+            report.relinked += 1
+        s.commit()
+    return report
+

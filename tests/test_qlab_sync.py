@@ -6,6 +6,7 @@ import pytest
 
 from qlab.cues import (
     Cues,
+    LayerInfo,
     MissingPatch,
     QLabCue,
     TypeMapping,
@@ -40,15 +41,22 @@ def show_cue(layer, number='42'):
 
 def test_sound_type_gets_prefix_and_jump():
     c = make_cues()
-    synced = c.sync_show_cues([show_cue('Fx Sound')], {'Fx Sound': 'sound'})
+    synced = c.sync_show_cues([show_cue('Fx Sound')], {'Fx Sound': LayerInfo('sound', 's')})
     assert synced[0].number == 's42'
     assert synced[0].type == 'Network'
     assert ('/cue_id/uuid-1/customString', '/jump 42') in c.q.sent
 
 
+def test_layer_prefix_comes_from_the_layer_not_its_type():
+    # a Sound layer whose prefix the user set to FX: QLab numbers follow the layer's config
+    c = make_cues()
+    synced = c.sync_show_cues([show_cue('Fx Sound')], {'Fx Sound': LayerInfo('sound', 'FX')})
+    assert synced[0].number == 'FX42'
+
+
 def test_video_type_gets_v_prefix_and_video_cue():
     c = make_cues()
-    synced = c.sync_show_cues([show_cue('Projector')], {'Projector': 'video'})
+    synced = c.sync_show_cues([show_cue('Projector')], {'Projector': LayerInfo('video', 'v')})
     assert synced[0].number == 'v42'
     assert synced[0].type == 'Video'
 
@@ -64,7 +72,7 @@ def test_plugin_cue_type_falls_back_to_layer_type():
     c = make_cues()
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'  # set by a third-party plugin; not a QLab type
-    synced = c.sync_show_cues([cue], {'Projector': 'video'})
+    synced = c.sync_show_cues([cue], {'Projector': LayerInfo('video', 'v')})
     assert synced[0].type == 'Video'
 
 
@@ -72,7 +80,7 @@ def test_qlab_cue_type_is_kept():
     c = make_cues()
     cue = show_cue('Fx Sound')
     cue.cue_type = 'MIDI'
-    synced = c.sync_show_cues([cue], {'Fx Sound': 'sound'})
+    synced = c.sync_show_cues([cue], {'Fx Sound': LayerInfo('sound', 's')})
     assert synced[0].type == 'MIDI'
 
 
@@ -81,7 +89,7 @@ def test_type_override_wins_over_layer_type():
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
     mapping = {'TheatreMix': TypeMapping(type='Audio')}
-    synced = c.sync_show_cues([cue], {'Projector': 'video'}, mapping)
+    synced = c.sync_show_cues([cue], {'Projector': LayerInfo('video', 'v')}, mapping)
     assert synced[0].type == 'Audio'
 
 
@@ -95,7 +103,7 @@ def test_type_mapping_sets_colour_and_osc_after_layer_colour():
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
     m = TypeMapping(type='Network', prefix='v', color='red', osc='/tm/{prefix}{number}/{name}')
-    c.sync_show_cues([cue], {'Projector': 'video'}, {'TheatreMix': m})
+    c.sync_show_cues([cue], {'Projector': LayerInfo('video', 'v')}, {'TheatreMix': m})
     assert ('/cue_id/uuid-1/customString', '/tm/v42/Cue') in c.q.sent
     assert [v for k, v in c.q.sent if k.endswith('/colorName')][-1] == 'red'
 
@@ -168,21 +176,21 @@ def test_silent_qlab_times_out_instead_of_blocking(monkeypatch):
 
 def test_lights_and_sound_set_no_patch_unless_chosen():
     c = make_cues()
-    c.sync_show_cues([show_cue('Lights'), show_cue('Fx Sound')], {'Lights': 'lights', 'Fx Sound': 'sound'})
+    c.sync_show_cues([show_cue('Lights'), show_cue('Fx Sound')], {'Lights': LayerInfo('lights', ''), 'Fx Sound': LayerInfo('sound', 's')})
     assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
 
 
 def test_chosen_patch_number_is_sent_for_its_layer():
     c = make_cues()
     c.sync_show_cues(
-        [show_cue('Fx Sound')], {'Fx Sound': 'sound'}, patches={'Fx Sound': 2}
+        [show_cue('Fx Sound')], {'Fx Sound': LayerInfo('sound', 's')}, patches={'Fx Sound': 2}
     )
     assert ('/cue_id/uuid-1/networkPatchNumber', 2) in c.q.sent
 
 
 def test_patch_for_another_layer_is_not_sent():
     c = make_cues()
-    c.sync_show_cues([show_cue('Lights')], {'Lights': 'lights'}, patches={'Fx Sound': 2})
+    c.sync_show_cues([show_cue('Lights')], {'Lights': LayerInfo('lights', '')}, patches={'Fx Sound': 2})
     assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
 
 
@@ -256,7 +264,7 @@ def test_mapped_network_type_takes_the_patch_from_its_mapping():
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
     mapping = {'TheatreMix': TypeMapping(type='Network', patch='tm-id')}
-    c.sync_show_cues([cue], {'Projector': 'video'}, mapping, type_patches={'TheatreMix': 3})
+    c.sync_show_cues([cue], {'Projector': LayerInfo('video', 'v')}, mapping, type_patches={'TheatreMix': 3})
     assert ('/cue_id/uuid-1/networkPatchNumber', 3) in c.q.sent
 
 
@@ -265,7 +273,7 @@ def test_mapped_type_without_patch_is_not_given_its_layers_patch():
     cue = show_cue('Lights')
     cue.cue_type = 'TheatreMix'
     mapping = {'TheatreMix': TypeMapping(type='Network')}
-    c.sync_show_cues([cue], {'Lights': 'lights'}, mapping, patches={'Lights': 1})
+    c.sync_show_cues([cue], {'Lights': LayerInfo('lights', '')}, mapping, patches={'Lights': 1})
     assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
 
 
@@ -273,7 +281,7 @@ def test_non_network_cue_on_a_network_layer_gets_no_patch():
     c = make_cues()
     cue = show_cue('Lights')
     cue.cue_type = 'MIDI'
-    c.sync_show_cues([cue], {'Lights': 'lights'}, patches={'Lights': 1})
+    c.sync_show_cues([cue], {'Lights': LayerInfo('lights', '')}, patches={'Lights': 1})
     assert not [k for k, _ in c.q.sent if k.endswith('/networkPatchNumber')]
 
 
@@ -324,7 +332,7 @@ def test_mapped_type_is_numbered_with_its_own_prefix():
     cue = show_cue('Projector')
     cue.cue_type = 'TheatreMix'
     mapping = {'TheatreMix': TypeMapping(type='Network', prefix='tm')}
-    synced = c.sync_show_cues([cue], {'Projector': 'video'}, mapping)
+    synced = c.sync_show_cues([cue], {'Projector': LayerInfo('video', 'v')}, mapping)
     assert synced[0].number == 'tm42'
 
 

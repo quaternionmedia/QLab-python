@@ -4,7 +4,7 @@ import re
 from collections import Counter
 
 from pydantic import BaseModel, Field
-from typing import Literal, get_args
+from typing import Literal, NamedTuple, get_args
 
 from qlab import QLab
 
@@ -72,20 +72,22 @@ def render_osc(template: str, cue: QLabCue, number: str, prefix: str) -> str:
 
 NOTE_ON = 0x90
 
-# QLab number prefix and cue type, keyed by ShowRunner layer type (layers.type)
-LAYER_IDS = {'lights': '', 'sound': 's', 'video': 'v', 'audio': 'a'}
+class LayerInfo(NamedTuple):
+    """A ShowRunner layer as QLab sync uses it: its cue type and the QLab number prefix."""
+
+    type: str
+    prefix: str
 
 
-def layer_prefix(layer: str | None, layer_type: str | None) -> str:
-    """QLab number prefix for a layer's cues.
+def layer_infos(layers: list[dict]) -> dict[str, LayerInfo]:
+    """Layer name -> LayerInfo, from ShowRunner's get_layers() dicts."""
+    return {x['name']: LayerInfo(x['type'], x['prefix']) for x in layers}
 
-    lights/sound/video/audio use their fixed prefix. Any other layer (generic, stage, unknown)
-    uses its name with non-alphanumerics dropped, so it cannot share plain numbers with the
-    lights layer (which has no prefix).
-    """
-    if layer_type in LAYER_IDS:
-        return LAYER_IDS[layer_type]
-    return re.sub(r'[^A-Za-z0-9]', '', layer or '')
+
+def layer_info(layer_types: dict[str, LayerInfo], name: str | None) -> LayerInfo:
+    """A layer's info. A name the show does not have is generic, prefixed with its letters."""
+    return layer_types.get(name) or LayerInfo('generic', re.sub(r'[^A-Za-z]', '', name or ''))
+
 CUE_TYPES = {
     'lights': 'Network',
     'sound': 'Network',
@@ -133,24 +135,24 @@ def qlab_number(number, point, prefix: str = '') -> str:
     return f'{prefix}{cue_number}'
 
 
-def qlab_prefix(cue, layer_types: dict[str, str], type_overrides=None) -> str:
+def qlab_prefix(cue, layer_types: dict[str, LayerInfo], type_overrides=None) -> str:
     """The QLab number prefix ``sync_show_cues`` gives *cue*: its type mapping's, else its layer's."""
-    layer = layer_types.get(cue.layer, 'generic')
     mapping = (type_overrides or {}).get(cue.cue_type)
-    return (mapping.prefix or '') if mapping else layer_prefix(cue.layer, layer)
+    return (mapping.prefix or '') if mapping else layer_info(layer_types, cue.layer).prefix
 
 
-def group_qlab_number(number: str | None, layer: str | None, layer_types: dict[str, str]) -> str:
+def group_qlab_number(number: str | None, layer: str | None,
+                      layer_types: dict[str, LayerInfo]) -> str:
     """QLab number for a ShowRunner group: its layer's prefix and number, as for a cue.
 
     '' if the group has no number or no layer (a number without a layer would be ambiguous).
     """
     if not number or not layer:
         return ''
-    return qlab_number(number, 0, layer_prefix(layer, layer_types.get(layer)))
+    return qlab_number(number, 0, layer_info(layer_types, layer).prefix)
 
 
-def show_qlab_number(cue, layer_types: dict[str, str], type_overrides=None) -> str:
+def show_qlab_number(cue, layer_types: dict[str, LayerInfo], type_overrides=None) -> str:
     """The QLab number ``sync_show_cues`` gives *cue*: the same rule, shared with group pull."""
     return qlab_number(cue.number, cue.point, qlab_prefix(cue, layer_types, type_overrides))
 
@@ -241,7 +243,7 @@ class Cues:
     def sync_show_cues(
         self,
         show_cues: list,
-        layer_types: dict[str, str],
+        layer_types: dict[str, LayerInfo],
         type_overrides: dict[str, TypeMapping] | None = None,
         patches: dict[str, int] | None = None,
         type_patches: dict[str, int] | None = None,
@@ -256,7 +258,7 @@ class Cues:
 
         Args:
             show_cues: List of ShowRunner Cue model instances.
-            layer_types: Maps layer name to ShowRunner layer type (from the layers table).
+            layer_types: Maps layer name to its LayerInfo (type and prefix, from the layers table).
             type_overrides: Maps a non-QLab cue type to how it is sent to QLab.
             patches: Maps layer name to the network patch number its cues use (see patch_numbers).
             type_patches: Maps a non-QLab cue type to the network patch number its mapping chose.
@@ -273,7 +275,7 @@ class Cues:
         for cue in show_cues:
             if not cue.layer or cue.number is None:  # unnumbered: nothing to send yet
                 continue
-            layer = layer_types.get(cue.layer, 'generic')
+            layer = layer_info(layer_types, cue.layer).type
             # A plugin's own cue type (e.g. 'TheatreMix') is not a QLab type: use its mapping,
             # else the layer's
             mapping = (type_overrides or {}).get(cue.cue_type)
@@ -356,6 +358,9 @@ class Cues:
             self.q.send(f'/cue_id/{cue.id}/networkPatchNumber', cue.patch)
         return cue
 
+    def workspace_id(self) -> str:
+        return self._workspace()
+
     def _workspace(self) -> str:
         # Unprefixed cue commands only reach one workspace, so refuse to guess between several
         open_ = _ok(self.q.send('/workspaces'))['data']
@@ -370,7 +375,11 @@ class Cues:
         return uid
 
     def set_group(self, uid: str, name: str, colour: str | None, number: str = '') -> None:
-        _ok(self.q.send(f'/cue_id/{uid}/number', value=number))
+        # shortcut: an empty number is not sent (the OSC builder drops '' and QLab rejects a bare
+        # number write), so clearing a group's number in ShowRunner leaves the QLab number, upgrade
+        # once osc.build sends empty strings and QLab accepts them as a clear
+        if number:
+            _ok(self.q.send(f'/cue_id/{uid}/number', value=number))
         _ok(self.q.send(f'/cue_id/{uid}/name', value=name or 'Group'))
         if colour:
             _ok(self.q.send(f'/cue_id/{uid}/colorName', colour))
