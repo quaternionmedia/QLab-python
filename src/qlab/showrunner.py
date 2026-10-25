@@ -168,7 +168,21 @@ def sync_cue_list(
         layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
     if layers is not None:
         show_cues = [c for c in show_cues if c.layer in layers]
-    return _sync_cues(cues, layer_types, show_cues, types or {}, patches)
+    result = _sync_cues(cues, layer_types, show_cues, types or {}, patches)
+    _record_links(result.pop('links'))
+    return result
+
+
+def _record_links(links: dict[int, tuple[str, str]]) -> None:
+    """Store each synced cue's QLab uniqueID and the QLab number it was sent with."""
+    if not links:
+        return
+    with get_db().session() as s:
+        for cue_id, (uid, number) in links.items():
+            cue = s.get(ShowCue, cue_id)
+            cue.external_id, cue.external_number = uid, number
+            s.add(cue)
+        s.commit()
 
 
 def sync_with_groups(
@@ -190,14 +204,20 @@ def sync_with_groups(
         cue_list = s.get(CueList, cue_list_id)
         if not cue_list:
             raise ValueError(f'CueList {cue_list_id} not found')
-        all_cues = s.exec(select(ShowCue).where(ShowCue.cue_list_id == cue_list_id)).all()
         layer_types = {layer['name']: layer['type'] for layer in get_layers(s, cue_list.show_id)}
         skip_uids = group_sync.unpushed_uids(s, cue_list_id)
     types = types or {}
     # Queued deletes go to QLab first, so the pull below does not bring those groups back
     deleted = group_sync.apply_pending_deletes(cues)
-    group_numbers = {show_qlab_number(c, layer_types, types): c.id for c in all_cues}
+    # Cue numbers renumbered in QLab come in first, so the numbers below are current
+    numbered = group_sync.pull_numbers(cues, cue_list_id, types)
+    with db.session() as s:
+        all_cues = s.exec(select(ShowCue).where(ShowCue.cue_list_id == cue_list_id)).all()
+        group_numbers = {show_qlab_number(c, layer_types, types): c.id
+                     for c in all_cues if c.number is not None}
     pulled = group_sync.pull(cues, cue_list_id, group_numbers, sync_orphans, skip_uids)
+    pulled.renumbered = numbered.renumbered
+    pulled.conflicts = numbered.conflicts + pulled.conflicts
     result = sync_cue_list(cues, cue_list_id, layers, types, patches)
     pushed = group_sync.push(cues, cue_list_id, group_numbers, result.pop('uids'))
     pushed.deleted = deleted
@@ -217,7 +237,7 @@ def _sync_cues(
     if missing:
         raise UnknownCueTypes(missing)
     if not show_cues:
-        return {'synced': 0, 'cues': [], 'uids': {}}
+        return {'synced': 0, 'cues': [], 'uids': {}, 'links': {}}
     unprefixed = sorted({c.cue_type for c in show_cues
                          if c.cue_type in types and not types[c.cue_type].prefix})
     if unprefixed:
@@ -231,11 +251,13 @@ def _sync_cues(
         live = cues.q.network_patches()
         numbers = patch_numbers(live, layer_pick)
         type_numbers = patch_numbers(live, type_pick)
-    synced = cues.sync_show_cues(show_cues, layer_types, types, numbers, type_numbers)
+    links: dict[int, tuple[str, str]] = {}
+    synced = cues.sync_show_cues(show_cues, layer_types, types, numbers, type_numbers, links)
     return {
         'synced': len(synced),
         'cues': [q.model_dump() for q in synced],
         'uids': {q.number: str(q.id) for q in synced if q.number},
+        'links': links,
     }
 
 

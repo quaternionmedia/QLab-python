@@ -31,14 +31,22 @@ from showrunner.models import Cue, CueGroup, CueList
 from showrunner.plugins.db import get_db
 from sqlmodel import select
 
-from qlab.cues import CUE_TYPES, Cues, show_qlab_number
+from qlab.cues import (
+    CUE_TYPES,
+    Cues,
+    group_qlab_number,
+    layer_prefix,
+    qlab_cues_by_uid,
+    qlab_prefix,
+    show_qlab_number,
+)
 from qlab.cues import group_tree as qlab_group_tree
 
 _lock = threading.Lock()
 dirty: set[int] = set()  # ShowRunner group ids changed since their last push
 pending_deletes: list[dict] = []  # snapshots of groups deleted in ShowRunner, not yet in QLab
 
-_NUMBER = re.compile(r'^[a-z]*(\d+)(?:\.(\d+))?$')
+_NUMBER = re.compile(r'^[A-Za-z]*(\d+)(?:\.(\d+))?$')
 
 
 def record_change(action: str, group: dict) -> None:
@@ -55,6 +63,7 @@ def record_change(action: str, group: dict) -> None:
 @dataclass
 class Report:
     pulled: int = 0
+    renumbered: int = 0
     created_groups: int = 0
     removed_groups: int = 0
     orphans_created: int = 0
@@ -142,11 +151,17 @@ def pull(
             for g in s.exec(select(CueGroup).where(
                 CueGroup.cue_list_id == cue_list_id, CueGroup.external_id.is_not(None)))
         }
+        linked = {c.external_id: c.id for c in s.exec(select(Cue).where(
+            Cue.cue_list_id == cue_list_id, Cue.external_id.is_not(None)))}
+
+        def cue_for(m) -> int | None:
+            """The ShowRunner cue of a QLab member: by its linked uniqueID, else by number."""
+            return linked.get(m.id, numbers.get(m.number))
 
         def holds(uid: str) -> bool:
             """True if the QLab group, or a group inside it, has a cue of this list."""
             node = by_uid[uid]
-            return any(m.number in numbers for m in node['members']) or any(
+            return any(cue_for(m) is not None for m in node['members']) or any(
                 holds(c) for c in node['children'] if c in by_uid)
 
         group_of: dict[str, int] = {}  # QLab uid -> ShowRunner group id, once written
@@ -159,8 +174,8 @@ def pull(
                 continue
             members = []
             for m in node['members']:
-                if m.number in numbers:
-                    members.append(numbers[m.number])
+                if cue_for(m) is not None:
+                    members.append(cue_for(m))
                 elif sync_orphans and _create_orphan(s, cue_list_id, m, layers, numbers):
                     members.append(numbers[m.number])
                     report.orphans_created += 1
@@ -169,14 +184,15 @@ def pull(
             parent = node['parent']
             parent_row = existing.get(parent)  # a conflict-skipped parent keeps its group
             parent_id = group_of.get(parent) or (parent_row.id if parent_row else None)
+            numbering = _group_number(node, layers, report)
             if uid in existing:
                 g = existing[uid]
                 g.parent_id = parent_id  # before set_members: cues it drops go to the parent
-                update_group(s, g.id, name=node['name'], color=_colour(node['color']))
+                _set_group(lambda **kw: update_group(s, g.id, **kw), node, numbering, report)
                 set_members(s, g.id, members)
             else:
-                g = create_group(s, cue_list_id, members, name=node['name'],
-                                 color=_colour(node['color']), parent_id=parent_id)
+                g = _set_group(lambda **kw: create_group(
+                    s, cue_list_id, members, parent_id=parent_id, **kw), node, numbering, report)
                 g.external_id = uid
                 report.created_groups += 1
             s.add(g)
@@ -191,6 +207,88 @@ def pull(
                 report.removed_groups += 1
         s.commit()
     return report
+
+
+def pull_numbers(cues: Cues, cue_list_id: int, types: dict) -> Report:
+    """Take cue numbers changed in QLab into ShowRunner, for cues linked to a QLab cue.
+
+    A linked cue whose QLab number changed since the last sync, and whose ShowRunner number
+    did not, takes the QLab number: its layer's prefix must match, the number must be digits
+    (with an optional .point), and no other cue may hold it. Otherwise ShowRunner keeps its
+    number, the sync writes it over the QLab change, and the case is reported. A change on
+    both sides is ShowRunner's too.
+    """
+    report = Report()
+    by_uid = qlab_cues_by_uid(cues.cuelists)
+    db = get_db()
+    with db.session() as s:
+        layer_types = {x['name']: x['type'] for x in get_layers(
+            s, s.get(CueList, cue_list_id).show_id)}
+        linked = s.exec(select(Cue).where(
+            Cue.cue_list_id == cue_list_id, Cue.external_id.is_not(None))).all()
+        for c in linked:
+            q = by_uid.get(c.external_id)
+            if q is None or not q.number or q.number == c.external_number:
+                continue  # gone from QLab (the sync re-creates it), or not changed there
+            if show_qlab_number(c, layer_types, types) != c.external_number:
+                report.conflicts.append(
+                    f'cue {c.number_label} (renumbered in both; ShowRunner kept)')
+                continue
+            prefix = qlab_prefix(c, layer_types, types)
+            digits = re.fullmatch(r'(\d+)(?:\.(\d+))?', q.number[len(prefix):])
+            if not q.number.startswith(prefix) or not digits:
+                report.conflicts.append(f'cue {c.number_label}: QLab number {q.number} is not '
+                                        f'a {prefix or "plain"} number (ShowRunner kept)')
+                continue
+            number, point = digits.group(1), int(digits.group(2) or 0)
+            clash = s.exec(select(Cue).where(
+                Cue.cue_list_id == cue_list_id, Cue.layer == c.layer, Cue.number == number,
+                Cue.point == point, Cue.id != c.id)).first()
+            if clash:
+                report.conflicts.append(f'cue {c.number_label}: QLab number {q.number} is taken '
+                                        f'by {clash.number_label} (ShowRunner kept)')
+                continue
+            c.number, c.point, c.external_number = number, point, q.number
+            s.add(c)
+            report.renumbered += 1
+        s.commit()
+    return report
+
+
+def _parse_group_number(qnum: str, layers: list[dict]) -> tuple[str, str] | None:
+    """(layer, number) for a QLab group number, if exactly one layer's prefix it carries."""
+    hits = []
+    for x in layers:
+        prefix = layer_prefix(x['name'], x['type'])
+        rest = qnum[len(prefix):] if qnum.startswith(prefix) else ''
+        if rest.isdigit():
+            hits.append((x['name'], rest))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _group_number(node: dict, layers: list[dict], report: Report) -> dict:
+    """Layer and number to take from QLab's group number.
+
+    Empty means QLab has none: keep ShowRunner's, since a number not yet pushed would be lost.
+    """
+    if not node['number']:
+        return {}
+    hit = _parse_group_number(node['number'], layers)
+    if hit is None:
+        report.conflicts.append(f"{node['name'] or node['uid']}: QLab number {node['number']} "
+                                "is not a layer's number (ShowRunner kept)")
+        return {}
+    return {'layer': hit[0], 'number': hit[1]}
+
+
+def _set_group(write, node: dict, numbering: dict, report: Report):
+    """Write a group's name, colour and number; a number that clashes is kept as it was."""
+    fields = dict(name=node['name'], color=_colour(node['color']))
+    try:
+        return write(**fields, **numbering)
+    except ValueError as e:
+        report.conflicts.append(f"{node['name'] or node['uid']}: {e} (ShowRunner kept)")
+        return write(**fields)
 
 
 def _depth(node: dict, by_uid: dict) -> int:
@@ -211,10 +309,11 @@ def _create_orphan(session, cue_list_id: int, qcue, layers: list[dict], numbers:
         return False
     layer_types = {x['name']: x['type'] for x in layers}
     for x in layers:
-        if CUE_TYPES.get(x['type']) != qcue.type:
+        if CUE_TYPES.get(x['type'], 'Network') != qcue.type:  # as sync_show_cues picks it
             continue
         cue = Cue(cue_list_id=cue_list_id, number=match.group(1), point=int(match.group(2) or 0),
-                  name=qcue.name, layer=x['name'], notes=qcue.notes)
+                  name=qcue.name, layer=x['name'], notes=qcue.notes,
+                  external_id=qcue.id, external_number=qcue.number)
         if show_qlab_number(cue, layer_types) == qcue.number:
             session.add(cue)
             session.flush()
@@ -234,6 +333,8 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
     known = set(uid_of.values())
     db = get_db()
     with db.session() as s:
+        show_id = s.get(CueList, cue_list_id).show_id
+        layer_types = {ly['name']: ly['type'] for ly in get_layers(s, show_id)}
         groups = group_tree(s, cue_list_id)
         depths = group_depths(groups)
         uid_of_group = {g['id']: g['external_id'] for g in groups if g['external_id']}
@@ -241,15 +342,16 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
             if g['external_id'] and g['id'] not in dirty:
                 continue
             row = s.get(CueGroup, g['id'])
+            qnum = group_qlab_number(g['number'], g['layer'], layer_types)
             if row.external_id is None:
-                uid = cues.new_group(g['name'], g['color'])
+                uid = cues.new_group(g['name'], g['color'], qnum)
                 row.external_id = uid
                 s.add(row)
                 uid_of_group[g['id']] = uid
                 report.created_groups += 1
             else:
                 uid = row.external_id
-                cues.set_group(uid, g['name'], g['color'])
+                cues.set_group(uid, g['name'], g['color'], qnum)
             tree = _snapshot(cues)  # earlier groups' moves changed the indexes
             node = tree.get(uid, {'children': [], 'index': 0, 'parent': None, 'list': None})
             wanted = [uid_of[c] for c in g['cue_ids'] if c in uid_of]

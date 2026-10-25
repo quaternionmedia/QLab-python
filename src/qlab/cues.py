@@ -74,6 +74,18 @@ NOTE_ON = 0x90
 
 # QLab number prefix and cue type, keyed by ShowRunner layer type (layers.type)
 LAYER_IDS = {'lights': '', 'sound': 's', 'video': 'v', 'audio': 'a'}
+
+
+def layer_prefix(layer: str | None, layer_type: str | None) -> str:
+    """QLab number prefix for a layer's cues.
+
+    lights/sound/video/audio use their fixed prefix. Any other layer (generic, stage, unknown)
+    uses its name with non-alphanumerics dropped, so it cannot share plain numbers with the
+    lights layer (which has no prefix).
+    """
+    if layer_type in LAYER_IDS:
+        return LAYER_IDS[layer_type]
+    return re.sub(r'[^A-Za-z0-9]', '', layer or '')
 CUE_TYPES = {
     'lights': 'Network',
     'sound': 'Network',
@@ -113,6 +125,8 @@ class QLabCueList(QLabCue):
 
 def qlab_number(number, point, prefix: str = '') -> str:
     """QLab cue number for a ShowRunner cue: layer/type *prefix*, number, then ``.point``."""
+    if number is None:
+        return ''
     cue_number = str(number)
     if point:
         cue_number += f'.{point}'
@@ -123,7 +137,17 @@ def qlab_prefix(cue, layer_types: dict[str, str], type_overrides=None) -> str:
     """The QLab number prefix ``sync_show_cues`` gives *cue*: its type mapping's, else its layer's."""
     layer = layer_types.get(cue.layer, 'generic')
     mapping = (type_overrides or {}).get(cue.cue_type)
-    return (mapping.prefix or '') if mapping else LAYER_IDS.get(layer, '')
+    return (mapping.prefix or '') if mapping else layer_prefix(cue.layer, layer)
+
+
+def group_qlab_number(number: str | None, layer: str | None, layer_types: dict[str, str]) -> str:
+    """QLab number for a ShowRunner group: its layer's prefix and number, as for a cue.
+
+    '' if the group has no number or no layer (a number without a layer would be ambiguous).
+    """
+    if not number or not layer:
+        return ''
+    return qlab_number(number, 0, layer_prefix(layer, layer_types.get(layer)))
 
 
 def show_qlab_number(cue, layer_types: dict[str, str], type_overrides=None) -> str:
@@ -149,7 +173,7 @@ def group_tree(cuelists: list) -> list[dict]:
             if cue.type == 'Group':
                 node = {
                     'uid': str(cue.id), 'name': cue.name or '', 'color': cue.colorName,
-                    'parent': parent, 'list': list_uid, 'index': index,
+                    'number': cue.number or '', 'parent': parent, 'list': list_uid, 'index': index,
                     'children': [], 'members': [],
                 }
                 groups.append(node)
@@ -161,6 +185,18 @@ def group_tree(cuelists: list) -> list[dict]:
     for cl in cuelists:
         walk(cl.cues, None, str(cl.id))
     return groups
+
+
+def qlab_cues_by_uid(cuelists: list) -> dict[str, QLabCue]:
+    """Every cue and group in *cuelists* by uniqueID, nested ones included."""
+    found: dict[str, QLabCue] = {}
+    stack = list(cuelists)
+    while stack:
+        cue = stack.pop()
+        if cue.id:
+            found[cue.id] = cue
+        stack.extend(cue.cues or [])
+    return found
 
 
 def flatten_cuelist(cuelist: QLabCue) -> dict[str, QLabCue]:
@@ -196,6 +232,7 @@ class Cues:
         for cl in self.cuelists:
             if cl.cues:
                 self.cues.update(flatten_cuelist(cl))
+        self.by_uid = qlab_cues_by_uid(self.cuelists)
 
     def get_cuelists(self):
         data = self.q.send('/cueLists')['data']
@@ -208,11 +245,14 @@ class Cues:
         type_overrides: dict[str, TypeMapping] | None = None,
         patches: dict[str, int] | None = None,
         type_patches: dict[str, int] | None = None,
+        links: dict[int, tuple[str, str]] | None = None,
     ) -> list[QLabCue]:
         """Sync ShowRunner Cue models to QLab.
 
         Converts each ShowRunner Cue into a QLabCue (applying layer prefixes
-        and cue-type mapping) then creates or updates the cue in QLab.
+        and cue-type mapping) then creates or updates the cue in QLab. A cue linked to a QLab
+        uniqueID (``external_id``) updates that cue, so a renumber moves it instead of making a
+        duplicate. An unlinked cue takes the QLab cue with its number, unless that one is linked.
 
         Args:
             show_cues: List of ShowRunner Cue model instances.
@@ -223,12 +263,15 @@ class Cues:
                 A mapped cue takes its patch from its mapping only, never from its layer.
 
         Returns:
-            List of QLabCue objects that were synced.
+            List of QLabCue objects that were synced. If *links* is given, it is filled with
+            each synced ShowRunner cue id -> (QLab uniqueID, QLab number).
         """
         synced: list[QLabCue] = []
         previous = None
+        claimed = {c.external_id for c in show_cues if c.external_id}
+        used: set[str] = set()  # QLab cues already written by this sync
         for cue in show_cues:
-            if not cue.layer:
+            if not cue.layer or cue.number is None:  # unnumbered: nothing to send yet
                 continue
             layer = layer_types.get(cue.layer, 'generic')
             # A plugin's own cue type (e.g. 'TheatreMix') is not a QLab type: use its mapping,
@@ -262,10 +305,21 @@ class Cues:
                     if mapping.osc else None
                 )
 
-            if qlab_number in self.cues:
+            linked = self.by_uid.get(cue.external_id) if cue.external_id else None
+            if linked is None:
+                by_number = self.cues.get(qlab_number)
+                if by_number and by_number.id not in claimed:
+                    linked = by_number
+            if linked is not None and linked.id in used:  # a duplicate link: make a new cue
+                linked = None
+            if linked is not None:
+                q.id = linked.id
                 previous = self.update_cue(q).id
             else:
                 previous = self.create_cue(q, previous).id
+            used.add(str(q.id))
+            if links is not None:
+                links[cue.id] = (str(q.id), qlab_number)
             synced.append(q)
         return synced
 
@@ -309,13 +363,14 @@ class Cues:
             raise QLabError(f'expected one open workspace, found {len(open_)}')
         return open_[0]['uniqueID']
 
-    def new_group(self, name: str, colour: str | None) -> str:
+    def new_group(self, name: str, colour: str | None, number: str = '') -> str:
         """Create an empty Group cue at the end of the list; returns its uniqueID."""
         uid = _ok(self.q.send('/new', 'group'))['data']
-        self.set_group(uid, name, colour)
+        self.set_group(uid, name, colour, number)
         return uid
 
-    def set_group(self, uid: str, name: str, colour: str | None) -> None:
+    def set_group(self, uid: str, name: str, colour: str | None, number: str = '') -> None:
+        _ok(self.q.send(f'/cue_id/{uid}/number', value=number))
         _ok(self.q.send(f'/cue_id/{uid}/name', value=name or 'Group'))
         if colour:
             _ok(self.q.send(f'/cue_id/{uid}/colorName', colour))

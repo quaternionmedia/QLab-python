@@ -16,11 +16,13 @@ from showrunner.models import Cue, CueGroup, CueList, Show
 from sqlmodel import select
 
 from qlab import group_sync
+from qlab import showrunner as qlab_showrunner
 from qlab.cues import (
     Cues,
     QLabCue,
     QLabCueList,
     TypeMapping,
+    group_qlab_number,
     group_tree,
     show_qlab_number,
 )
@@ -82,7 +84,10 @@ class FakeQLab:
         if message == '/new':
             self.next_id += 1
             uid = U(self.next_id)
-            self.tree[0]['cues'].append({'uniqueID': uid, 'type': 'Group', 'cues': []})
+            kind = value if isinstance(value, str) else value[0]  # value may be [type, previous]
+            node = {'uniqueID': uid, 'type': 'Group', 'cues': []} if kind == 'group' else {
+                'uniqueID': uid, 'type': 'Network', 'number': None, 'name': None}
+            self.tree[0]['cues'].append(node)
             return uid
         if message.startswith('/cue_id/'):
             node = self._find(message.split('/')[2])[2]
@@ -90,6 +95,8 @@ class FakeQLab:
                 node['name'] = value
             elif message.endswith('/colorName'):
                 node['colorName'] = value
+            elif message.endswith('/number'):
+                node['number'] = value
             return None
         if message.startswith('/workspace/ws/move/'):
             uid = message.rsplit('/', 1)[1]
@@ -166,6 +173,16 @@ def test_new_group_sets_name_and_colour():
     assert ('/cue_id/%s/colorName' % uid, 'orange') in fake.sent
 
 
+def test_group_number_takes_layer_prefix_like_a_cue():
+    layer_types = {'Lights': 'lights', 'Sound': 'sound'}
+    assert group_qlab_number('5', 'Sound', layer_types) == 's5'
+    assert group_qlab_number('5', 'Lights', layer_types) == '5'
+    assert group_qlab_number(None, 'Sound', layer_types) == ''
+    cues, fake = make_cues(cue_list_tree())
+    uid = cues.new_group('Act 1', 'orange', 's5')
+    assert ('/cue_id/%s/number' % uid, 's5') in fake.sent
+
+
 # --- ShowRunner side: DB fixture ------------------------------------------------------------
 
 @pytest.fixture()
@@ -173,6 +190,7 @@ def show_db(tmp_path, monkeypatch):
     db = ShowDatabase(tmp_path / 'sync.db')
     db.create_schema()
     monkeypatch.setattr(group_sync, 'get_db', lambda: db)
+    monkeypatch.setattr(qlab_showrunner, 'get_db', lambda: db)
     with db.session() as s:
         s.add(Show(name='Hamlet'))
         s.commit()
@@ -377,3 +395,85 @@ def test_qlab_no_colour_maps_to_grey():
     from qlab.group_sync import _colour
     assert _colour('none') == 'grey' and _colour(None) == 'grey' and _colour('') == 'grey'
     assert _colour('orange') == 'orange'
+
+
+# --- cue numbers: renumbers go both ways on the same QLab cue ---------------------------
+
+def _link(db, cue_id, uid, number):
+    with db.session() as s:
+        c = s.get(Cue, cue_id)
+        c.external_id, c.external_number = uid, number
+        s.add(c)
+        s.commit()
+
+
+def _renumber_showrunner(db, cue_id, number):
+    with db.session() as s:
+        c = s.get(Cue, cue_id)
+        c.number = number
+        s.add(c)
+        s.commit()
+
+
+def _cue(db, cue_id):
+    with db.session() as s:
+        c = s.get(Cue, cue_id)
+        return c.number, c.point, c.group_id, c.external_id, c.external_number
+
+
+def test_renumber_in_showrunner_moves_the_same_qlab_cue(show_db):
+    cues, fake = make_cues(cue_list_tree(qcue(50, number='1', name='a')))
+    _link(show_db, 1, U(50), '1')
+    _renumber_showrunner(show_db, 1, '5')
+    qlab_sync_result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert qlab_sync_result['synced'] == 2
+    nodes = fake.tree[0]['cues']
+    assert [n['number'] for n in nodes if n['uniqueID'] == U(50)] == ['5']  # no duplicate
+    assert not any(n.get('number') == '1' for n in nodes)
+    assert _cue(show_db, 1)[3:] == (U(50), '5')
+
+
+def test_renumber_in_qlab_is_pulled_into_showrunner(show_db):
+    cues, fake = make_cues(cue_list_tree(qcue(50, number='7', name='a')))  # renumbered in QLab
+    _link(show_db, 1, U(50), '1')  # last synced as 1
+    qlab_showrunner.sync_with_groups(cues, 1)
+    assert _cue(show_db, 1)[:2] == ('7', 0)
+    assert _cue(show_db, 1)[3:] == (U(50), '7')
+    assert [n['uniqueID'] for n in fake.tree[0]['cues']].count(U(50)) == 1
+
+
+def test_group_keeps_a_cue_renumbered_in_showrunner(show_db):
+    tree = cue_list_tree(qcue(60, type_='Group', name='Act', children=[qcue(50, number='1')]))
+    cues, _ = make_cues(tree)
+    _link(show_db, 1, U(50), '1')
+    with show_db.session() as s:
+        g = CueGroup(cue_list_id=1, name='Act', color='grey', external_id=U(60))
+        s.add(g)
+        s.flush()
+        c = s.get(Cue, 1)
+        c.group_id, c.number = g.id, '5'
+        s.add(c)
+        s.commit()
+        gid = g.id
+    result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert _cue(show_db, 1)[2] == gid
+    assert result['groups']['pulled']['orphans_skipped'] == 0
+
+
+def test_number_changed_on_both_sides_keeps_showrunner_and_reports(show_db):
+    cues, fake = make_cues(cue_list_tree(qcue(50, number='7', name='a')))
+    _link(show_db, 1, U(50), '1')
+    _renumber_showrunner(show_db, 1, '5')
+    result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert _cue(show_db, 1)[:2] == ('5', 0)
+    assert [n['number'] for n in fake.tree[0]['cues'] if n['uniqueID'] == U(50)] == ['5']
+    assert any('both' in c for c in result['groups']['pulled']['conflicts'])
+
+
+def test_qlab_renumber_onto_a_taken_number_keeps_showrunner_and_reports(show_db):
+    cues, fake = make_cues(cue_list_tree(qcue(50, number='2', name='a')))  # QLab moved it to 2
+    _link(show_db, 1, U(50), '1')
+    result = qlab_showrunner.sync_with_groups(cues, 1)
+    assert _cue(show_db, 1)[:2] == ('1', 0)  # cue 2 already has number 2 in ShowRunner
+    assert any('taken' in c for c in result['groups']['pulled']['conflicts'])
+    assert [n['number'] for n in fake.tree[0]['cues'] if n['uniqueID'] == U(50)] == ['1']

@@ -33,7 +33,8 @@ def make_cues():
 
 def show_cue(layer, number='42'):
     return SimpleNamespace(
-        layer=layer, cue_type=None, number=number, point=0, name='Cue', notes=None
+        layer=layer, cue_type=None, number=number, point=0, name='Cue', notes=None,
+        external_id=None,
     )
 
 
@@ -55,7 +56,7 @@ def test_video_type_gets_v_prefix_and_video_cue():
 def test_unknown_layer_falls_back_to_generic():
     c = make_cues()
     synced = c.sync_show_cues([show_cue('Gone')], {})
-    assert synced[0].number == '42'
+    assert synced[0].number == 'Gone42'  # the layer's name is its prefix
     assert synced[0].type == 'Network'
 
 
@@ -139,7 +140,7 @@ def test_sync_follows_script_order(tmp_path, monkeypatch):
         def __init__(self):
             self.numbers = []
 
-        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches, links=None):
             self.numbers = [c.number for c in show_cues]
             return []
 
@@ -238,7 +239,7 @@ def test_saved_patch_round_trips_and_sync_uses_its_number(tmp_path, monkeypatch)
         q = FakeQ()
         patches = None
 
-        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches, links=None):
             self.patches = patches
             return []
 
@@ -308,7 +309,7 @@ def test_sync_resolves_mapped_type_patch_to_its_number(tmp_path, monkeypatch):
         q = FakeQ()
         type_patches = None
 
-        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches):
+        def sync_show_cues(self, show_cues, layer_types, types, patches, type_patches, links=None):
             self.type_patches = type_patches
             return []
 
