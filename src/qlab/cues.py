@@ -371,7 +371,11 @@ class Cues:
     def new_group(self, name: str, colour: str | None, number: str = '') -> str:
         """Create an empty Group cue at the end of the list; returns its uniqueID."""
         uid = _ok(self.q.send('/new', 'group'))['data']
-        self.set_group(uid, name, colour, number)
+        try:
+            self.set_group(uid, name, colour, number)
+        except QLabError:
+            self.delete_cue(uid)  # the caller never gets this uid, so it would be left behind
+            raise
         return uid
 
     def set_group(self, uid: str, name: str, colour: str | None, number: str = '') -> None:

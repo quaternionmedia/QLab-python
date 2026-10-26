@@ -21,6 +21,7 @@ from qlab.cues import (
     Cues,
     LayerInfo,
     QLabCue,
+    QLabError,
     QLabCueList,
     TypeMapping,
     group_qlab_number,
@@ -541,6 +542,16 @@ def test_qlab_renumber_onto_a_taken_number_keeps_showrunner_and_reports(show_db)
     assert _cue(show_db, 1)[:2] == ('1', 0)  # cue 2 already has number 2 in ShowRunner
     assert any('taken' in c for c in result['groups']['pulled']['conflicts'])
     assert [n['number'] for n in fake.tree[0]['cues'] if n['uniqueID'] == U(50)] == ['1']
+
+
+def test_refused_group_number_leaves_no_empty_group_in_qlab():
+    cues, fake = make_cues(cue_list_tree())
+    send = fake.send
+    fake.send = lambda m, value=None: ({'address': m, 'status': 'error', 'data': None}
+                                       if m.endswith('/number') else send(m, value))
+    with pytest.raises(QLabError):
+        cues.new_group('After song', 'orange', 'Q92')
+    assert fake.tree[0]['cues'] == []
 
 
 def test_unnumbered_group_is_created_without_a_number_write(show_db):

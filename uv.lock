@@ -295,11 +295,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fountain"
-version = "0.1.0"
-source = { git = "https://github.com/quaternionmedia/fountain?branch=deduplicate#9f059d0ca202d1737cdf9ba03ab952ee2a9f9b3e" }
-
-[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1504,7 +1499,6 @@ name = "qlab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fountain" },
     { name = "pydantic" },
     { name = "python-osc" },
     { name = "sqlmodel" },
@@ -1523,10 +1517,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fountain", git = "https://github.com/quaternionmedia/fountain?branch=deduplicate" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "python-osc", specifier = ">=1.8.3" },
-    { name = "showrunner", marker = "extra == 'showrunner'", editable = "../ShowRunner" },
+    { name = "showrunner", marker = "extra == 'showrunner'", specifier = ">=0.5.3" },
     { name = "sqlmodel", specifier = ">=0.0.27" },
 ]
 provides-extras = ["showrunner"]
@@ -1571,7 +1564,7 @@ wheels = [
 [[package]]
 name = "showrunner"
 version = "0.5.3"
-source = { editable = "../ShowRunner" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
@@ -1582,39 +1575,10 @@ dependencies = [
     { name = "sqlmodel" },
     { name = "watchfiles" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.18.4" },
-    { name = "fastapi", specifier = ">=0.135.2" },
-    { name = "fpdf2", marker = "extra == 'pdf'", specifier = ">=2.8.7" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "nicegui", specifier = ">=2.0" },
-    { name = "pluggy", specifier = ">=1.6.0" },
-    { name = "python-osc", marker = "extra == 'osc'", specifier = ">=1.10.2" },
-    { name = "python-rtmidi", marker = "extra == 'midi'", specifier = ">=1.5" },
-    { name = "screenplay-tools", specifier = ">=0.0.10" },
-    { name = "showrunner", extras = ["admin"], marker = "extra == 'all'" },
-    { name = "showrunner", extras = ["cli"], marker = "extra == 'all'" },
-    { name = "showrunner", extras = ["midi"], marker = "extra == 'all'" },
-    { name = "showrunner", extras = ["osc"], marker = "extra == 'all'" },
-    { name = "showrunner", extras = ["pdf"], marker = "extra == 'all'" },
-    { name = "sqladmin", marker = "extra == 'admin'", specifier = ">=0.20.1" },
-    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'admin'", specifier = ">=2.0.54" },
-    { name = "sqlmodel", specifier = ">=0.0.37" },
-    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.24.1" },
-    { name = "watchfiles", specifier = ">=1.0.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/cb/ed/d40c1cfa8fe9a6dc599fef129f6d692a39aa8a8281c872ed2109abe06bf6/showrunner-0.5.3.tar.gz", hash = "sha256:ac3c420790b9af99759a5fff7eaff9fb65cc3012f6e5a1eb7ad68aa6d1e2799d", size = 84239, upload-time = "2026-10-23T19:57:06.199Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/d7/394836a0e025a3bd671c85064425ab49df7fdc71de68f397700d10113456/showrunner-0.5.3-py3-none-any.whl", hash = "sha256:dc99e7bb5e35c60f17272f6158c3636b0e7a31cecd87510801fb2bde6658bd83", size = 100133, upload-time = "2026-10-23T19:57:04.816Z" },
 ]
-provides-extras = ["admin", "cli", "midi", "osc", "pdf", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "black", specifier = ">=26.3.1" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "ruff", specifier = ">=0.15.8" },
-    { name = "uvicorn", specifier = ">=0.42.0" },
-]
-docs = [{ name = "zensical", specifier = ">=0.0.31" }]
 
 [[package]]
 name = "simple-websocket"

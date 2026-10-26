@@ -174,6 +174,88 @@ def test_silent_qlab_times_out_instead_of_blocking(monkeypatch):
         server.close()
 
 
+def _fake_qlab(late=(), late_delay=0.6):
+    """A QLab on localhost: answers each request, but drops one identical to the request before
+    it that arrives under 0.1 s later (as the real QLab does), and answers the first request of
+    each address in *late* only after *late_delay* seconds."""
+    import json
+    import socket
+    import threading
+    import time
+
+    server = socket.create_server(('127.0.0.1', 0))
+    late = set(late)
+    last = {'frame': None, 'at': 0.0}
+    lock = threading.Lock()
+
+    def serve(conn):
+        buf = b''
+        while chunk := conn.recv(65536):
+            buf += chunk
+            while buf.count(b'\xc0') >= 2:
+                frame, _, buf = buf[buf.index(b'\xc0') + 1:].partition(b'\xc0')
+                with lock:
+                    repeat = frame == last['frame'] and time.time() - last['at'] < 0.1
+                    last['frame'], last['at'] = frame, time.time()
+                if repeat:
+                    continue
+                address = frame.split(b'\x00')[0].decode()
+                if address in late:
+                    late.discard(address)
+                    time.sleep(late_delay)
+                body = json.dumps({'address': address, 'status': 'ok', 'data': address})
+                payload = (address + body).encode()
+                payload += b'\x00' * ((4 - len(payload) % 4) % 4 or 4)
+                conn.sendall(b'\xc0' + payload + b'\xc0')
+
+    def accept_forever():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            threading.Thread(target=serve, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=accept_forever, daemon=True).start()
+    return server
+
+
+def test_repeated_request_is_not_dropped_by_qlab(monkeypatch):
+    # QLab ignores a request identical to the one just before it; the client waits between them
+    import qlab.osc
+    from qlab import QLab
+
+    monkeypatch.setattr(qlab.osc, 'REPLY_TIMEOUT', 1.0)
+    server = _fake_qlab()
+    try:
+        q = QLab('127.0.0.1', server.getsockname()[1])
+        for _ in range(3):
+            assert q.send('/workspaces')['address'] == '/workspaces'
+        q.close()
+    finally:
+        server.close()
+
+
+def test_late_reply_after_timeout_does_not_answer_the_next_request(monkeypatch):
+    # QLab answers /cueLists after the client gave up; that reply must not be read as /workspaces
+    import time
+
+    import qlab.osc
+    from qlab import QLab
+
+    monkeypatch.setattr(qlab.osc, 'REPLY_TIMEOUT', 0.2)
+    server = _fake_qlab(late={'/cueLists'}, late_delay=0.6)
+    try:
+        q = QLab('127.0.0.1', server.getsockname()[1])
+        with pytest.raises(TimeoutError):
+            q.send('/cueLists')
+        time.sleep(0.6)  # the late /cueLists reply has arrived by now
+        assert q.send('/workspaces')['address'] == '/workspaces'
+        q.close()
+    finally:
+        server.close()
+
+
 def test_lights_and_sound_set_no_patch_unless_chosen():
     c = make_cues()
     c.sync_show_cues([show_cue('Lights'), show_cue('Fx Sound')], {'Lights': LayerInfo('lights', ''), 'Fx Sound': LayerInfo('sound', 's')})

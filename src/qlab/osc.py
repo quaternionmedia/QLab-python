@@ -1,3 +1,4 @@
+from contextlib import suppress
 from json import loads
 from socket import AF_INET, SOCK_DGRAM, create_connection, socket
 from struct import unpack
@@ -128,8 +129,17 @@ class Osc:
 class Client(Osc):  # TCP SLIP osc 1.1 connection
     def __init__(self, addr, port) -> None:
         # self.client = udp_client.UDPClient(addr, port) # for udp
+        self.addr, self.port = addr, port
         self.conn = create_connection((addr, port), timeout=REPLY_TIMEOUT)
         self.lock = Lock()
+        self.fresh = False  # a new connection must have /alwaysReply sent again
+
+    def reconnect(self) -> None:
+        # A reply to a timed-out request arrives late and would answer the next request
+        self.fresh = True
+        with suppress(OSError):
+            self.conn.close()
+        self.conn = create_connection((self.addr, self.port), timeout=REPLY_TIMEOUT)
 
     def send_message(self, message: str, value=None) -> None:
         encoded = build(message, value)
