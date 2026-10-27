@@ -35,6 +35,7 @@ from sqlmodel import select
 from qlab.cues import (
     CUE_TYPES,
     Cues,
+    QLabError,
     group_qlab_number,
     layer_infos,
     qlab_cues_by_uid,
@@ -363,6 +364,10 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
         groups = group_tree(s, cue_list_id)
         depths = group_depths(groups)
         uid_of_group = {g['id']: g['external_id'] for g in groups if g['external_id']}
+        # QLab groups with a number and no ShowRunner link: a new group with that number would clash
+        linked = set(s.exec(select(CueGroup.external_id).where(CueGroup.external_id.is_not(None))))
+        in_qlab = {n['number']: n for n in qlab_group_tree(cues.get_cuelists()) if n['number']}
+        free = {num: n['uid'] for num, n in in_qlab.items() if n['uid'] not in linked}
         for g in sorted(groups, key=lambda g: depths[g['id']]):  # parents first
             if g['external_id'] and g['id'] not in dirty:
                 continue
@@ -370,7 +375,18 @@ def push(cues: Cues, cue_list_id: int, numbers: dict[str, int], uids: dict[str, 
             qnum = group_qlab_number(g['number'], g['layer'], layer_types)
             created = row.external_id is None
             if created:
-                uid = cues.new_group(g['name'], g['color'], qnum)
+                uid = free.pop(qnum, None)  # QLab keeps numbers unique: take that group over
+                if not uid and qnum in in_qlab:  # held by another ShowRunner group: QLab would refuse
+                    report.conflicts.append(
+                        f"{g['name']!r}: QLab number {qnum} is held by {in_qlab[qnum]['name']!r}; not written")
+                    continue
+                if uid:
+                    cues.set_group(uid, g['name'], g['color'], qnum)
+                else:
+                    try:
+                        uid = cues.new_group(g['name'], g['color'], qnum)
+                    except QLabError as e:  # the sync stops here; name the group for the report
+                        raise QLabError(f"group {g['name']!r} as {qnum!r}: {e}") from e
                 row.external_id = uid
                 s.add(row)
                 uid_of_group[g['id']] = uid

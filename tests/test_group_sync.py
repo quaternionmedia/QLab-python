@@ -595,3 +595,36 @@ def test_sync_in_another_workspace_relinks_instead_of_duplicating(show_db):
     with show_db.session() as s:
         from showrunner.models import Config
         assert s.exec(select(Config).where(Config.key == 'qlab.workspace.1')).one().value == 'ws'
+
+
+def test_new_group_takes_over_an_unlinked_qlab_group_with_its_number(show_db):
+    with show_db.session() as s:
+        create_group(s, 1, [1, 2], name='Scene', layer='Lights', number='5')
+        s.commit()
+    group_sync.dirty.add(1)
+    tree = cue_list_tree(qcue(9, type_='Group', number='5', name='Old', children=[]),
+                         qcue(3, number='1'), qcue(4, number='2'))
+    cues, fake = make_cues(tree)
+    group_sync.push(cues, 1, NUMBERS, {'1': U(3), '2': U(4)})
+    assert not [m for m, _ in fake.sent if m == '/new']  # no duplicate group was made
+    with show_db.session() as s:
+        assert s.get(CueGroup, 1).external_id == U(9)
+    assert ('/cue_id/%s/name' % U(9), 'Scene') in fake.sent
+
+
+def test_push_reports_number_held_by_another_linked_group_instead_of_failing(show_db):
+    with show_db.session() as s:
+        create_group(s, 1, [1], name='Other', layer='Lights', number='7')
+        create_group(s, 1, [2], name='Scene', layer='Lights', number='5')
+        s.commit()
+        s.get(CueGroup, 1).external_id = U(9)  # linked to QLab group 9, which holds number 5
+        s.commit()
+    group_sync.dirty.add(2)
+    tree = cue_list_tree(qcue(9, type_='Group', number='5', name='Other', children=[]),
+                         qcue(3, number='1'), qcue(4, number='2'))
+    cues, fake = make_cues(tree)
+    report = group_sync.push(cues, 1, NUMBERS, {'1': U(3), '2': U(4)})
+    assert not [m for m, _ in fake.sent if m in ('/new', '/cue_id/%s/number' % U(9))]
+    assert report.conflicts and 'held by' in report.conflicts[0]
+    with show_db.session() as s:
+        assert s.get(CueGroup, 2).external_id is None  # left unlinked for the user to decide
